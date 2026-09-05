@@ -42,7 +42,7 @@ uninstall() {
 
   echo "Removed the udev rule and the units."
   echo "Left in place: $CONF, and the current threshold on the battery itself."
-  echo "To lift the cap entirely: echo 100 | sudo tee /sys/class/power_supply/BAT*/charge_control_end_threshold"
+  echo "To lift the cap entirely: echo 100 | sudo tee /sys/class/power_supply/*/charge_control_end_threshold"
   exit 0
 }
 
@@ -54,8 +54,10 @@ shopt -s nullglob
 batteries=(/sys/class/power_supply/*/charge_control_end_threshold)
 shopt -u nullglob
 [[ ${#batteries[@]} -gt 0 ]] || die \
-  "No battery here exposes charge_control_end_threshold. On ASUS hardware,
-check that the asus_nb_wmi module is loaded: lsmod | grep asus_nb_wmi"
+  "No battery on this machine exposes charge_control_end_threshold. On an ASUS
+laptop, check that the asus_nb_wmi module is loaded: lsmod | grep asus_nb_wmi.
+On other hardware this usually means the kernel driver does not support a
+charge threshold."
 
 [[ -n "$TARGET_USER" ]] || die \
   "Cannot tell which account to grant access to. Run this with sudo rather
@@ -88,30 +90,42 @@ chmod 664 "$CONF"
 # --------------------------------------------------------------- udev rule
 
 # Sysfs attributes are not device nodes, so udev's own GROUP and MODE keys do
-# not reach them. chgrp and chmod through RUN is the way this is done, and it
-# has to run on every add so that the ownership is restored after a boot, a
-# module reload or a battery that comes back as a new device.
+# not apply to them. Running chgrp and chmod through RUN is how this is done,
+# and it has to run on every add so that the ownership is restored after a
+# boot, after a module reload, and when a battery reappears as a new device.
 #
-# One file, not two. Granting the battery's `uevent` as well was tried, on the
-# theory that a synthetic udev event would make UPower re-read the threshold
-# and stop Omarchy's own battery panel from disagreeing with this one. It does
-# not: UPower never reads the hardware threshold, so no event changes what it
-# reports. See the note in the README. A privilege that buys nothing is not
-# worth granting.
+# The rule matches on the device type rather than on the kernel name. Most
+# machines name the pack BAT0, but not all drivers do, and a rule keyed on
+# BAT* would silently grant nothing on the ones that do not, leaving a panel
+# that reads correctly and then refuses every change.
+#
+# Both thresholds are granted. The end threshold is the cap itself; the start
+# threshold is needed because some drivers, thinkpad_acpi among them, reject
+# an end threshold below the current start threshold, and the tool lowers the
+# start threshold out of the way when that happens. Machines whose driver has
+# no start threshold simply have nothing to grant, and chgrp is told to be
+# quiet about the missing file.
+#
+# The battery's uevent file is deliberately not granted. It was tried, on the
+# theory that a synthetic udev event would prompt UPower to re-read the
+# threshold and stop Omarchy's own battery panel from disagreeing with this
+# one, but UPower never reads the hardware threshold, so no event changes what
+# it reports. The README explains that in full.
 cat > "$RULE" <<EOF
-# Let the $GROUP group set the ASUS charge threshold without a password.
+# Let the $GROUP group set the battery charge thresholds without a password.
 # Installed by battery-limit-install. Removed by --uninstall.
-ACTION=="add", SUBSYSTEM=="power_supply", KERNEL=="BAT*", \\
-  RUN+="/bin/sh -c 'chgrp $GROUP /sys%p/charge_control_end_threshold 2>/dev/null; chmod 664 /sys%p/charge_control_end_threshold 2>/dev/null; exit 0'"
+ACTION=="add", SUBSYSTEM=="power_supply", ATTR{type}=="Battery", \\
+  RUN+="/bin/sh -c 'chgrp $GROUP /sys%p/charge_control_end_threshold /sys%p/charge_control_start_threshold 2>/dev/null; chmod 664 /sys%p/charge_control_end_threshold /sys%p/charge_control_start_threshold 2>/dev/null; exit 0'"
 EOF
 
 # --------------------------------------------------------------- root helper
 
-# Deliberately POSIX sh with no dependency on the plugin, and deliberately
-# parsing rather than sourcing the config. The file is group-writable so the
-# panel can change it without a password, and sourcing a group-writable file
-# as root would turn "can set a charge limit" into "can run anything as root".
-# Reading only digits out of it closes that.
+# This is POSIX sh with no dependency on the plugin, and it parses the
+# configuration file rather than sourcing it. The file is group-writable so
+# that the panel can change it without a password, and sourcing a
+# group-writable file as root would turn the ability to set a charge limit
+# into the ability to run any command as root. Reading only integers out of it
+# prevents that.
 install -d -m 755 "$LIBDIR"
 cat > "$HELPER" <<'EOF'
 #!/bin/sh
@@ -147,8 +161,23 @@ fi
 case $value in *[!0-9]*) exit 0 ;; esac
 [ "$value" -ge 40 ] && [ "$value" -le 100 ] || exit 0
 
+# Every pack is written, because a machine with a second battery exposes a
+# threshold on each of them and the panel sets both.
 for attr in /sys/class/power_supply/*/charge_control_end_threshold; do
   [ -w "$attr" ] || continue
+  printf '%s\n' "$value" > "$attr" 2>/dev/null && continue
+
+  # Some drivers, thinkpad_acpi among them, refuse an end threshold below the
+  # point at which charging is set to resume. Lower that point and try once
+  # more. It is only touched after the driver has already refused the write.
+  start="${attr%end_threshold}start_threshold"
+  [ -w "$start" ] || continue
+  current=$(cat "$start" 2>/dev/null) || continue
+  case $current in ""|*[!0-9]*) continue ;; esac
+  [ "$current" -ge "$value" ] || continue
+  lowered=$((value - 5))
+  [ "$lowered" -lt 0 ] && lowered=0
+  printf '%s\n' "$lowered" > "$start" 2>/dev/null || continue
   printf '%s\n' "$value" > "$attr" 2>/dev/null || true
 done
 exit 0
@@ -157,10 +186,11 @@ chmod 755 "$HELPER"
 
 # --------------------------------------------------------------- units
 
-# Three units rather than one, because they answer to different events and a
-# single oneshot cannot. In particular a service with RemainAfterExit=yes is
-# already active when the machine resumes, so systemd will not run it again;
-# the resume reapply has to be its own unit.
+# There are three units rather than one, because they respond to different
+# events and a single oneshot service cannot cover all three. A service with
+# RemainAfterExit=yes is still active when the machine resumes, so systemd
+# will not start it again, which means the reapply after resume has to be a
+# unit of its own.
 cat > "$UNITDIR/omarchy-battery-limit.service" <<EOF
 [Unit]
 Description=Apply the configured battery charge limit

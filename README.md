@@ -1,9 +1,9 @@
 # omarchy-battery-limit
 
 A charge cap for the Omarchy bar. The glyph shows the ceiling your battery is
-charging to, and the panel behind it sets that ceiling: four standing caps on a
-row, a slider for the values between them, and one button that raises the cap
-to 100% for travel and then puts it back on its own.
+charging to, and the panel behind it sets that ceiling. It offers four standing
+caps on a row, a slider for the values between them, and one button that raises
+the cap to 100% for travel and then lowers it again on its own.
 
 ```bash
 omarchy plugin add https://github.com/brightwalker25/omarchy-battery-limit.git
@@ -11,24 +11,24 @@ omarchy plugin enable brightwalker25.battery-limit --section right
 sudo ~/.config/omarchy/plugins/brightwalker25.battery-limit/bin/battery-limit-install
 ```
 
-The third line is the one that matters and it runs once. It grants your account
-the right to set the threshold without a password, and installs the units that
-put the cap back after a reboot or a resume. Without it the panel opens, reads
-correctly, and refuses every change with the reason why.
-[INSTALL.md](INSTALL.md) covers what that step writes, the development install,
-running the tool from a terminal, and uninstalling.
+The third line is the important one, and it is run once. It grants your account
+the right to set the threshold without a password, and it installs the systemd
+units that reapply the cap after a reboot or a resume. Without it the panel
+still opens and reads the battery correctly, but it refuses every change and
+explains why. [INSTALL.md](INSTALL.md) describes what that step writes, the
+development install, running the tool from a terminal, and uninstalling.
 
-## Why cap at all
+## Why cap the charge
 
-Lithium cells age from time spent at a high state of charge, and a laptop that
-lives on mains spends nearly all of its life there. Holding the charge at 60%
-rather than 100% slows that down substantially. The cost is a smaller reserve
-on the days you unplug, which is what the travel button is for.
+Lithium cells age from the time they spend at a high state of charge, and a
+laptop that lives on mains power spends nearly all of its life in that state.
+Holding the charge at 60% rather than 100% slows the process down
+substantially. The cost is a smaller reserve on the days you unplug the
+machine, which is what the travel button is for.
 
-The panel shows the health figure next to the cap for a reason. It is capacity
-now against capacity when the pack was new, and it is the number that says
-whether capping is worth doing on this machine or whether the argument is
-already over.
+The panel shows a health figure next to the cap. It is the present capacity of
+the pack measured against its capacity when new, and it is the figure that
+indicates whether capping is still worth doing on a given machine.
 
 ## What it does
 
@@ -38,23 +38,23 @@ already over.
 | Slider | Any cap from 40 to 99, for the values between the presets. |
 | Travel button | Raises the cap to 100% for a fixed period, then reverts on its own. |
 
-A standing cap is a decision you make once. A travel cap is an exception you
-make on a particular day, and the two are kept apart on purpose: the presets
-and the slider cannot reach 100%, and the travel button is the only control
-that can. That is the whole design. A cap set to 100% and forgotten is the
-state this plugin exists to get you out of, so the only route to 100% is the
-one that expires.
+A standing cap is a decision made once. A travel cap is an exception made on a
+particular day. The two are kept apart deliberately: the presets and the slider
+cannot reach 100%, and the travel button is the only control that can. A cap
+that has been set to 100% and forgotten is the situation this plugin is meant
+to prevent, so the only route to 100% is the one that expires by itself.
 
-The override lasts 24 hours by default, and 8 hours, 3 days, 1 week, or "until
-I change it" are available in the widget's settings. Clicking the button again
-ends it early. It reverts even if you never open the panel again, because the
-expiry is checked by a system timer rather than by the panel.
+The override lasts 24 hours by default. Periods of 8 hours, 3 days, 1 week, and
+one that does not expire are available in the widget's settings. Clicking the
+button again ends the override early. The expiry is checked by a system timer
+rather than by the panel, so an override reverts even if the panel is never
+opened again.
 
 ## Design
 
 A script prints one JSON snapshot and the QML panel renders it. This is the
-same shape as `omarchy-system` and `omarchy-vpn-check`, and it means every
-judgement lives in one testable file that runs fine from a terminal:
+same arrangement used by `omarchy-system` and `omarchy-vpn-check`, and it keeps
+every judgement in a single file that can be run from a terminal:
 
 ```bash
 ./bin/battery-limit --text          # cap, charge, health, and setup state
@@ -63,46 +63,46 @@ judgement lives in one testable file that runs fine from a terminal:
 ./bin/battery-limit set 100 --for 3d
 ```
 
-### The firmware is the authority, not the request
+### Reading the limit back from the firmware
 
-Every write is read back, and it is the read-back that gets displayed. ASUS
-firmware is free to round a request to its own steps, and on some models it
-does. A panel that echoes your own request at you is reporting an intention
-and calling it a state.
+Every write is followed by a read, and the value that is displayed is the value
+that was read back. Firmware is free to round a request to steps of its own,
+and some models do. A panel that displayed the request instead would be
+reporting an intention while presenting it as a state.
 
-The same distinction runs through the whole tool. The bar reads the hardware
-value; the config file holds what you asked for; and when they disagree the
-panel says so rather than picking one. They disagree in exactly one situation
-worth catching, which is a cap that was configured but did not survive
-something, and hiding that is how you find out six months later that the cap
-has not been on.
+The same distinction runs through the rest of the tool. The bar shows the value
+held by the hardware, the configuration file holds the value you asked for, and
+when the two disagree the panel reports the disagreement rather than choosing
+between them. They disagree in one situation that matters, which is a cap that
+was configured but did not survive some later event. Concealing that is how a
+user discovers six months afterwards that the cap has not been in force.
 
-### Nothing runs as root, once
+### Privileges are granted once, by the installer
 
-Writing the threshold needs root, and there is nowhere to type a password in a
-bar panel. The installer resolves this once by handing the sysfs attribute to
-the `wheel` group through a udev rule, after which the panel and the CLI are
-ordinary unprivileged programs. No polkit agent, no password prompt, no sudo in
-the hot path.
+Writing the threshold requires root, and a bar panel offers nowhere to type a
+password. The installer resolves this once by granting the `wheel` group access
+to the sysfs attributes through a udev rule, after which the panel and the CLI
+are ordinary unprivileged programs. There is no polkit agent, no password
+prompt and no use of sudo while the tool is running.
 
-The units that reapply the cap at boot and on resume do run as root, and they
-read the same config file the panel writes. That file is group-writable, so the
-root helper parses it for integers rather than sourcing it. Sourcing a
-group-writable file as root would quietly convert "can set a charge limit" into
-"can run anything as root", which is not a trade worth making for three lines
-of shell.
+The units that reapply the cap at boot and after resume do run as root, and
+they read the same configuration file that the panel writes. Because that file
+is group-writable, the root helper parses it for integers rather than sourcing
+it. Sourcing a group-writable file as root would convert the ability to set a
+charge limit into the ability to run any command as root, which is not a
+reasonable price for three lines of shell.
 
-### Three units, not one
+### Why there are three systemd units
 
 The obvious implementation is a single oneshot service wanted by both
-`multi-user.target` and the sleep targets. It does not work. A oneshot with
-`RemainAfterExit=yes` is still active when the machine resumes, so systemd sees
-nothing to start and the cap is never reapplied; without `RemainAfterExit` the
-unit shows as dead at boot instead. Boot, resume and expiry are three different
-events and they get three units.
+`multi-user.target` and the sleep targets, and it does not work. A oneshot
+service with `RemainAfterExit=yes` is still active when the machine resumes, so
+systemd finds nothing to start and the cap is never reapplied. Without
+`RemainAfterExit` the same unit instead shows as dead after boot. Boot, resume
+and expiry are three different events, so they are handled by three units.
 
-Whether the cap survives a suspend at all is model dependent. On this Zenbook
-it does, and the resume unit is insurance that costs one file write.
+Whether the cap survives a suspend at all depends on the model. On this Zenbook
+it does, and the resume unit is a precaution that costs one file write.
 
 ## Requirements
 
@@ -115,91 +115,85 @@ it does, and the resume unit is insurance that costs one file write.
 
 ## Hardware support
 
-Nothing here is specific to any vendor beyond the driver that exposes the
-attribute. The battery is found by scanning `/sys/class/power_supply` for a
-node whose `type` is `Battery` and which carries
-`charge_control_end_threshold`, rather than by assuming `BAT0`, so in principle
-this works on any laptop whose kernel driver provides that file. One command
-settles it on a given machine:
+Nothing in this plugin is specific to a vendor beyond the kernel driver that
+exposes the attribute. Batteries are found by scanning `/sys/class/power_supply`
+for nodes whose `type` is `Battery` and which carry
+`charge_control_end_threshold`, so neither the name `BAT0` nor any particular
+driver is assumed. One command establishes whether a given machine is
+supported:
 
 ```bash
 cat /sys/class/power_supply/*/charge_control_end_threshold
 ```
 
-A number means the hardware side is there. Nothing at all means this plugin
-has nothing to drive, and the panel will say so rather than pretending.
+If that prints a number, the hardware side of the requirement is met. If it
+prints nothing, no driver on the machine offers a charge threshold, and the
+panel reports that rather than appearing to work.
 
-What follows is the honest boundary of that claim.
+The plugin has only ever been run on one machine, an ASUS Zenbook with
+`asus_nb_wmi` loaded. The behaviour described below is taken from the code and
+from the kernel drivers rather than from hardware in hand, so it should be
+treated as a description of what the code does, not as a tested support matrix.
 
-It has only been used on one machine, an ASUS Zenbook with `asus_nb_wmi`
-loaded. Everything below is read off the code and the kernel drivers rather
-than off hardware in hand, so treat it as where to look first when something
-misbehaves, not as a support matrix.
+Machines with more than one battery are handled by setting the threshold on
+every pack that exposes one. The panel and the `status` output take their
+headline readings from the first pack, and report a warning if the packs are
+capped at different values.
 
-On ThinkPads the driver also exposes `charge_control_start_threshold`, and it
-rejects an end threshold below the current start threshold. This plugin reads
-the start threshold for display but never writes it, so if something has
-already set one, typically TLP or the firmware itself, lowering the cap past it
-fails and the panel reports the write error rather than the reason. Clearing or
-lowering the start threshold by hand is the workaround. ThinkPad firmware also
-keeps thresholds across a reboot on its own, which makes the boot and resume
-units redundant there rather than harmful.
+Some drivers, `thinkpad_acpi` among them, also expose
+`charge_control_start_threshold`, which is the charge at which the machine
+resumes charging, and they reject an end threshold below it. When a driver
+refuses a write for that reason, the start threshold is lowered five points
+below the new cap and the write is attempted again. The start threshold is
+touched only after the driver has already refused the write, so on hardware
+that does not impose the restriction it is left exactly as the firmware had it.
+ThinkPad firmware also retains thresholds across a reboot without help, which
+makes the boot and resume units redundant on those machines rather than
+harmful.
 
-If the battery is not named `BAT0`, `BAT1` and so on, the udev rule will not
-match it. The rule keys on `KERNEL=="BAT*"`, while the CLI accepts any node of
-the right type, so on hardware that names the pack something else the panel
-reads correctly and then refuses every write, pointing at an installer that has
-already been run.
-
-With two packs the two halves disagree. The panel and `status` act on the first
-battery that carries the attribute, while the root helper that runs at boot
-writes every one it can. On a machine with an external or secondary pack, the
-boot cap and the panel cap cover different hardware.
-
-Some vendors expose no such attribute. Many Lenovo IdeaPads offer a
+Some vendors expose no such attribute at all. Many Lenovo IdeaPads offer a
 `conservation_mode` toggle on the platform device instead, which is a fixed
-preset rather than a threshold and is not something this reads. Support for
-Dell, Framework, MSI, System76 and Samsung arrived in different kernel versions
-through different drivers, so on those the answer depends on the kernel rather
-than on this plugin.
+preset rather than a threshold, and this plugin does not read it. Support for
+Dell, Framework, MSI, System76 and Samsung machines arrived in different kernel
+versions through different drivers, so on those the answer depends on the
+kernel rather than on this plugin.
 
-On a desktop, or any machine with no battery at all, the widget still draws its
-glyph and the panel carries a warning. It does not break; it just has nothing
-to say.
+On a desktop, or on any machine with no battery, the widget still draws its
+glyph and the panel displays a warning explaining that there is nothing to cap.
 
-The firmware remains the authority throughout. It is free to quantise a
-requested cap to its own steps, to refuse a value outright, or to hold the
-charge below the cap and decline to top it up, and none of that is something
-this can override. Every write is read back and it is the read-back that is
-displayed, so what the panel shows is what the battery is holding. What this
-cannot do is charge past a cap the firmware enforces elsewhere, discharge a
-pack down to a target, or schedule anything by time of day.
+The firmware remains the authority throughout. It may round a requested cap to
+steps of its own, refuse a value outright, or hold the charge below the cap and
+decline to top it up, and none of that can be overridden from here. Since every
+write is read back, what the panel displays is what the battery is holding.
+This plugin cannot charge past a cap enforced elsewhere in firmware, discharge
+a pack down to a target, or schedule anything by time of day.
 
-The installer assumes an Arch-shaped system: `wheel` as the administrative
-group, udev under `/etc/udev/rules.d`, and systemd. It is an Omarchy plugin, so
-that is a fair assumption, but on a Debian-derived system the group would need
-to be `sudo`.
+The installer assumes a system of Arch's shape: `wheel` as the administrative
+group, udev rules under `/etc/udev/rules.d`, and systemd. That is a reasonable
+assumption for an Omarchy plugin, but on a Debian-derived system the group
+would need to be `sudo`.
 
-## Why Omarchy's own battery panel disagrees
+## Why the stock Omarchy battery panel disagrees
 
-The stock `omarchy.power` panel will report a different limit from this one,
-and it is the stock panel that is wrong. `omarchy-battery-status` reads
+The stock `omarchy.power` panel reports a different limit from this one, and
+the stock panel is the one that is wrong. `omarchy-battery-status` reads
 `charge-end-threshold` from UPower and falls back to sysfs only when UPower
-returns nothing. UPower always returns something. On this hardware it reports a
-75-80% pair alongside `ChargeThresholdEnabled = false`, which are the values it
-would apply if something asked it to, not a reading of the firmware. Setting
-the threshold to 60, 70 or 95 does not move them.
+returns nothing, but UPower always returns something. On this hardware it
+reports a 75-80% pair alongside `ChargeThresholdEnabled = false`. Those are the
+values UPower would apply if something asked it to, not a reading of the
+firmware, and setting the threshold to 60, 70 or 95 does not move them.
 
-So the sysfs fallback never runs, and the stock panel reports a limit that is
-not in force. This plugin reads sysfs directly and reports what the battery is
-actually holding.
+The sysfs fallback therefore never runs, and the stock panel reports a limit
+that is not in force. This plugin reads sysfs directly and reports what the
+battery is actually holding.
 
-There is no way to fix this from outside Omarchy. UPower has no method to
-re-read the value: `Refresh()` is not implemented on the device interface, and
-`EnableChargeThreshold` only toggles UPower's own preset. Raising a synthetic
-udev event does not help either, which was tried before the cause was
+There is no way to correct this from outside Omarchy. UPower provides no method
+to re-read the value: `Refresh()` is not implemented on the device interface,
+and `EnableChargeThreshold` only toggles UPower's own preset. Raising a
+synthetic udev event does not help either, which was tried before the cause was
 understood. The fix belongs in `omarchy-battery-status`, which should either
-prefer sysfs or check `ChargeThresholdEnabled` before trusting UPower's pair.
+prefer sysfs or check `ChargeThresholdEnabled` before trusting the pair of
+values UPower reports.
 
 ## License
 

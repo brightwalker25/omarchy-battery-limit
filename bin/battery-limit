@@ -4,30 +4,33 @@ bar panel and for use from a terminal.
 
 Design notes:
 
-- The script decides, the panel renders. Which limit is in force, whether a
-  travel override is still running, whether the firmware honoured what it was
-  asked for, and whether the machine is set up to hold the limit across a
-  reboot are all worked out here and shipped as JSON, so the QML holds no
-  policy and every answer can be reproduced at the command line.
-- Nothing here runs as root. The one privileged act, writing to
-  `charge_control_end_threshold`, is made unprivileged once by the installer,
-  which hands the attribute to the `wheel` group through a udev rule. Until
-  that has been done `set` fails with the command to run rather than raising a
-  password prompt inside a bar panel, where there is nowhere to type one.
-- The requested limit and the effective limit are reported separately. ASUS
-  firmware is free to quantise what it is given, and a panel that echoes the
-  request back is claiming something it has not checked. Every write is read
-  back, and it is the read-back that is displayed.
-- The standing limit and the travel override live in a config file rather than
-  in this process, because the units that reapply the limit at boot and on
-  resume run as root, long after any panel has gone. That file is the contract
-  between the two halves, which is why it holds nothing but digits.
+- All of the decisions are made here and the panel only renders them. Which
+  limit is in force, whether a travel override is still running, whether the
+  firmware accepted what it was given, and whether the machine is configured
+  to hold the limit across a reboot are all determined in this script and
+  published as JSON. The QML therefore contains no policy, and every answer
+  the panel displays can be reproduced at the command line.
+- Nothing here runs as root. The only privileged operation is writing to
+  charge_control_end_threshold, and the installer makes that unprivileged once
+  by granting the wheel group access to the attribute through a udev rule.
+  Until the installer has been run, `set` fails and reports the command to
+  run, rather than raising a password prompt in a bar panel where there is
+  nowhere to type one.
+- The requested limit and the effective limit are reported separately, because
+  firmware is free to round a request to its own steps. Every write is read
+  back afterwards, and the value that is displayed is the value read back.
+- The standing limit and the travel override are kept in a configuration file
+  rather than in this process, because the systemd units that reapply the
+  limit at boot and after resume run as root, long after any panel has exited.
+  That file is the interface between the two halves, and it holds nothing but
+  integers.
 
-Exit status is 0 when the requested operation succeeded, 1 when it did not.
-`status` succeeds even on a machine with no controllable battery; the answer
-is in the JSON.
+Exit status is 0 when the requested operation succeeded and 1 when it did not.
+`status` succeeds even on a machine with no controllable battery, where the
+answer is reported in the JSON.
 """
 import argparse
+import errno
 import json
 import os
 import re
@@ -40,10 +43,17 @@ POWER_SUPPLY = "/sys/class/power_supply"
 LIMIT_ATTR = "charge_control_end_threshold"
 START_ATTR = "charge_control_start_threshold"
 
-# Below this a cap stops being battery care and starts being a laptop that
-# dies when unplugged. The firmware would accept less; the tool will not.
+# Below this a cap stops preserving the battery and starts producing a laptop
+# that runs out as soon as it is unplugged. The firmware would accept a lower
+# value, but this tool does not offer one.
 MIN_LIMIT = 40
 MAX_LIMIT = 100
+
+# How far below the end threshold a start threshold is lowered when a driver
+# refuses to accept the two at the same value. Charging then resumes five
+# points below the cap instead of at it, which avoids the charger switching on
+# and off repeatedly around a single point.
+START_GAP = 5
 
 DURATION = re.compile(r"^(\d+)\s*([hdwm])?$", re.I)
 
@@ -68,22 +78,35 @@ def read_int(path):
         return None
 
 
-def find_battery():
-    """The first battery exposing a writable-in-principle end threshold.
+def find_batteries():
+    """Every battery that exposes an end threshold, in kernel name order.
 
-    Nothing here assumes BAT0. A machine can carry two packs, and only one of
-    them need be the one the firmware throttles.
+    The name of the node is not assumed to be BAT0, or even to begin with BAT,
+    because that varies between drivers. A machine may also carry more than
+    one pack, in which case each of them is capped, so that the limit does not
+    depend on which pack the panel happened to look at first.
     """
+    found = []
     if not os.path.isdir(POWER_SUPPLY):
-        return None
+        return found
     for name in sorted(os.listdir(POWER_SUPPLY)):
         path = os.path.join(POWER_SUPPLY, name)
         if not os.path.exists(os.path.join(path, LIMIT_ATTR)):
             continue
         if (read_attr(os.path.join(path, "type")) or "") != "Battery":
             continue
-        return path
-    return None
+        found.append(path)
+    return found
+
+
+def find_battery():
+    """The first battery that exposes an end threshold, or None.
+
+    The readings shown in the bar and the panel come from this one. On the
+    ordinary machine with a single pack it is the only candidate.
+    """
+    batteries = find_batteries()
+    return batteries[0] if batteries else None
 
 
 def health(path):
@@ -105,12 +128,13 @@ def health(path):
 # --------------------------------------------------------------- config file
 
 def read_conf():
-    """Parse the config file, accepting digits and nothing else.
+    """Parse the configuration file, accepting integers and nothing else.
 
     The file is group-writable so that the panel can change the limit without
-    a password, and it is read back by a root helper at boot. Anything that is
-    not a plain integer is discarded rather than interpreted, so that the two
-    halves cannot be talked into meaning something else.
+    a password, and it is read at boot by a helper running as root. Anything
+    that is not a plain integer is discarded rather than interpreted, so that
+    write access to the file cannot be turned into anything more than the
+    ability to choose a charge limit.
     """
     conf = {"limit": None, "travel_limit": None, "travel_until": None}
     try:
@@ -144,18 +168,19 @@ def write_conf(conf):
         "" if conf["travel_limit"] is None else conf["travel_limit"],
         "" if conf["travel_until"] is None else conf["travel_until"],
     )
-    # Written in place, into the existing inode, rather than through the usual
-    # write-a-temp-file-and-rename dance. That pattern needs permission to
-    # create and unlink files in /etc, which this process does not have and
-    # should not be given: the whole privilege model here is one
-    # group-writable file, not a writable /etc. Opening "r+" also keeps the
-    # root:wheel ownership and the 664 mode that the installer set, which a
-    # freshly created file would not inherit.
+    # The file is written in place, into the existing inode, rather than by
+    # writing a temporary file and renaming it over the original. The rename
+    # approach would require permission to create and unlink files in /etc,
+    # which this process does not have and should not be granted, since the
+    # privilege being granted here is one group-writable file rather than a
+    # writable /etc. Opening the file with "r+" also preserves the root:wheel
+    # ownership and the 664 mode that the installer applied, neither of which
+    # a newly created file would inherit.
     #
-    # The cost is that the write is not atomic. It is one short buffer written
-    # in a single call, and the reader on the other side accepts only complete
-    # lines of digits and applies nothing when it finds none, so a torn write
-    # loses the setting rather than corrupting the machine's idea of it.
+    # The cost of that choice is that the write is not atomic. It is a single
+    # short buffer written in one call, and the reader accepts only complete
+    # lines of digits and applies nothing when it finds none, so an interrupted
+    # write loses the setting rather than corrupting it.
     with open(CONF, "r+") as fh:
         fh.write(body)
         fh.truncate()
@@ -165,9 +190,10 @@ def write_conf(conf):
 def effective_limit(conf, now=None):
     """Which of the two configured limits is in force, and why.
 
-    A travel override with no expiry runs until it is cleared by hand. One
-    whose expiry has passed is not in force, and this is the only place that
-    decides so; the caller does not compare clocks.
+    A travel override with no expiry remains in force until it is cleared by
+    hand, and one whose expiry has passed is no longer in force. This is the
+    only place where that comparison is made, so no caller needs to examine
+    the clock itself.
     """
     now = time.time() if now is None else now
     if conf["travel_limit"] is not None:
@@ -179,12 +205,12 @@ def effective_limit(conf, now=None):
 # --------------------------------------------------------------- installation
 
 def setup_state(battery):
-    """What of the system integration is present, as three independent facts.
+    """Which parts of the system integration are present, as three facts.
 
-    They are reported separately because they fail separately. The attribute
-    can be writable while the units are missing, which is a machine that takes
-    a new limit now and forgets it at the next reboot, and that is worth
-    saying out loud rather than folding into one boolean.
+    They are reported separately because they can fail separately. The
+    attribute may be writable while the systemd units are absent, which
+    describes a machine that will accept a new limit now and forget it at the
+    next reboot. Combining the three into a single boolean would conceal that.
     """
     attr = os.path.join(battery, LIMIT_ATTR) if battery else None
     return {
@@ -197,7 +223,8 @@ def setup_state(battery):
 # --------------------------------------------------------------- the snapshot
 
 def snapshot():
-    battery = find_battery()
+    batteries = find_batteries()
+    battery = batteries[0] if batteries else None
     conf = read_conf()
     limit, source = effective_limit(conf)
     setup = setup_state(battery)
@@ -205,6 +232,7 @@ def snapshot():
     rep = {
         "generatedAt": int(time.time()),
         "battery": os.path.basename(battery) if battery else "",
+        "batteries": [],
         "supported": battery is not None,
         "hardwareLimit": None,
         "startThreshold": None,
@@ -225,9 +253,21 @@ def snapshot():
 
     if not battery:
         rep["warnings"].append(
-            "No battery on this machine exposes a charge threshold. On ASUS "
-            "hardware that usually means the asus_nb_wmi module is not loaded.")
+            "No battery on this machine exposes a charge threshold. On an "
+            "ASUS laptop that usually means the asus_nb_wmi module is not "
+            "loaded. On other hardware it usually means the kernel driver "
+            "does not support a charge threshold at all.")
         return rep
+
+    # Each pack is listed, because a machine with a second battery has a
+    # threshold on each of them and they can be set to different values by
+    # something other than this tool.
+    rep["batteries"] = [
+        {"name": os.path.basename(path),
+         "hardwareLimit": read_int(os.path.join(path, LIMIT_ATTR)),
+         "startThreshold": read_int(os.path.join(path, START_ATTR))}
+        for path in batteries
+    ]
 
     rep["hardwareLimit"] = read_int(os.path.join(battery, LIMIT_ATTR))
     rep["startThreshold"] = read_int(os.path.join(battery, START_ATTR))
@@ -239,6 +279,16 @@ def snapshot():
     # The firmware is the authority on what the limit actually is. A config
     # file that disagrees with it is describing an intention, not a state, and
     # the difference is exactly what goes wrong when a reboot drops the cap.
+    caps = set(b["hardwareLimit"] for b in rep["batteries"]
+               if b["hardwareLimit"] is not None)
+    if len(caps) > 1:
+        rep["warnings"].append(
+            "The batteries on this machine are capped at different values: %s. "
+            "Run `battery-limit apply` to set them all to the configured limit."
+            % ", ".join("%s at %d%%" % (b["name"], b["hardwareLimit"])
+                        for b in rep["batteries"]
+                        if b["hardwareLimit"] is not None))
+
     if limit is not None and rep["hardwareLimit"] is not None \
             and limit != rep["hardwareLimit"]:
         rep["warnings"].append(
@@ -260,27 +310,85 @@ def snapshot():
 
 # --------------------------------------------------------------- the actions
 
-def apply_limit(value):
-    """Write one threshold and report what the firmware settled on.
-
-    The read-back is the point. ASUS firmware on some models rounds to its own
-    steps, and a caller that trusts its own request will draw a limit the
-    machine is not keeping.
-    """
-    battery = find_battery()
-    if not battery:
-        return None, "No battery on this machine exposes a charge threshold."
-    attr = os.path.join(battery, LIMIT_ATTR)
+def write_attr(path, value):
+    """Write an integer to a sysfs attribute, returning the error if it fails."""
     try:
-        with open(attr, "w") as fh:
+        with open(path, "w") as fh:
             fh.write("%d\n" % value)
-    except PermissionError:
+    except OSError as exc:
+        return exc
+    return None
+
+
+def set_battery_limit(battery, value):
+    """Set the end threshold on one battery and report what the firmware kept.
+
+    The value is read back after the write because firmware is permitted to
+    round a request to its own steps, and a caller that trusted its own
+    request would display a limit the machine is not applying.
+
+    Some drivers, thinkpad_acpi among them, reject an end threshold that is
+    below the current start threshold, which is the point at which charging
+    resumes. Where that happens the start threshold is lowered out of the way
+    and the write is attempted once more. It is only touched when the driver
+    has already refused the write, so on hardware that does not impose the
+    restriction the setting is left exactly as the firmware had it.
+    """
+    attr = os.path.join(battery, LIMIT_ATTR)
+    start_attr = os.path.join(battery, START_ATTR)
+
+    err = write_attr(attr, value)
+    if err is None:
+        return read_int(attr), None
+
+    if getattr(err, "errno", None) == errno.EINVAL:
+        start = read_int(start_attr)
+        if start is not None and start >= value:
+            lowered = max(0, value - START_GAP)
+            start_err = write_attr(start_attr, lowered)
+            if start_err is not None:
+                return None, (
+                    "This driver will not accept a limit of %d%% while "
+                    "charging is set to resume at %d%%, and %s could not be "
+                    "lowered to %d%%: %s"
+                    % (value, start, start_attr, lowered, start_err))
+            err = write_attr(attr, value)
+            if err is None:
+                return read_int(attr), None
+
+    if getattr(err, "errno", None) == errno.EACCES:
         return None, (
             "Not permitted to write %s. Run the installer once with sudo to "
             "grant your account access: see INSTALL.md." % attr)
-    except OSError as exc:
-        return None, "Could not write %s: %s" % (attr, exc)
-    return read_int(attr), None
+    return None, "Could not write %s: %s" % (attr, err)
+
+
+def apply_limit(value):
+    """Set the end threshold on every battery, and report the first result.
+
+    A machine with a second pack exposes a threshold on each of them, and the
+    root helper that runs at boot writes to all of them. This does the same,
+    so that the limit the panel shows and the limit the machine holds after a
+    reboot describe the same hardware.
+    """
+    batteries = find_batteries()
+    if not batteries:
+        return None, "No battery on this machine exposes a charge threshold."
+
+    effective = None
+    failures = []
+    for battery in batteries:
+        got, err = set_battery_limit(battery, value)
+        if err is not None:
+            failures.append("%s: %s" % (os.path.basename(battery), err))
+        elif effective is None:
+            effective = got
+
+    if effective is None:
+        return None, "\n".join(failures)
+    for failure in failures:
+        warn("The limit was set, but one battery did not accept it. " + failure)
+    return effective, None
 
 
 def parse_duration(text):
@@ -313,14 +421,14 @@ def cmd_set(args):
         except ValueError as exc:
             fail(str(exc))
         conf["travel_limit"] = value
-        # A standing limit has to exist for the override to expire back to. On
-        # a first run there may not be one, and reverting to nothing would
-        # silently mean 100%.
+        # A standing limit must exist for the override to expire back to. On
+        # a first run there may not be one yet, and reverting to no limit at
+        # all would mean reverting to 100%.
         if conf["limit"] is None:
             conf["limit"] = 80
     else:
-        # Setting the limit outright is also how you leave travel mode. Two
-        # ways to say "this is my limit now" would be one too many.
+        # Setting the limit outright is also how a travel override is left,
+        # rather than providing a second command that does the same thing.
         conf["limit"] = value
         conf["travel_limit"] = None
         conf["travel_until"] = None
@@ -341,9 +449,10 @@ def cmd_set(args):
 def cmd_apply(_args):
     """Put the configured limit back, retiring a travel override that has run out.
 
-    This is what the boot, resume and timer units call. It is idempotent, and
-    silent when there is nothing configured, because a machine with no config
-    should be left exactly as the firmware left it.
+    This is the command the boot, resume and timer units call. It is
+    idempotent, and it does nothing at all when no limit has been configured,
+    so that a machine without a configuration file is left as the firmware
+    left it.
     """
     conf = read_conf()
     limit, source = effective_limit(conf)
@@ -444,17 +553,17 @@ def fail(msg):
 # --------------------------------------------------------------- entry point
 
 def main():
-    # The output flags are accepted on either side of the subcommand, because
-    # `battery-limit apply --text` is the order anyone would type and being
-    # told off for it is a poor reward. SUPPRESS is what makes that work: the
-    # subparser copies leave the attribute unset unless the flag was actually
-    # given, so one passed before the subcommand is not overwritten by the
+    # The output flags are accepted on either side of the subcommand, since
+    # `battery-limit apply --text` is a natural order in which to type them.
+    # SUPPRESS is what allows that: the copies of the flag held by each
+    # subparser leave the attribute unset unless the flag was actually given,
+    # so a flag passed before the subcommand is not overwritten by the
     # subparser's own default.
     #
-    # The default is read back with getattr rather than declared with
-    # set_defaults, because `parents=` shares one Action object across every
-    # parser that lists it, and set_defaults would write through that shared
-    # object and cancel the SUPPRESS it depends on.
+    # The default is read back with getattr rather than declared through
+    # set_defaults, because `parents=` shares a single Action object with
+    # every parser that lists it, and set_defaults would write through that
+    # shared object and undo the SUPPRESS this depends on.
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--text", action="store_true",
                         default=argparse.SUPPRESS,

@@ -9,10 +9,11 @@ import qs.Ui
 // below is what the bar requires of any widget hosting a panel, and this file
 // follows that implementation closely. See LICENSE for the full notice.
 
-// The cap, in the bar. The glyph is a battery outline and stays that way at
-// every charge level, because the charge is already in the bar next to this
-// and a second reading of the same number is noise. The number here is the
-// ceiling, which nothing else in the bar reports.
+// The cap, as it appears in the bar. The glyph is a battery outline and stays
+// that way at every charge level, because the charge itself is already shown
+// by the widget next to this one and a second reading of the same number would
+// add nothing. The number shown here is the ceiling, which nothing else in the
+// bar reports.
 //
 // The widget reads the cap for itself rather than asking the panel, so the bar
 // is right from the moment the shell starts and stays right when the limit is
@@ -21,7 +22,7 @@ BarWidget {
   id: root
   moduleName: "brightwalker25.battery-limit"
 
-  // nf-md-battery_outline. A shape that does not imply a level.
+  // nf-md-battery_outline, which is a shape that does not imply a level.
   readonly property string glyph: "󰂎"
 
   readonly property bool showLimit: setting("showLimitInBar", true) !== false
@@ -93,9 +94,10 @@ BarWidget {
       onStreamFinished: {
         try {
           var rep = JSON.parse(String(text))
-          // The hardware reading, not the configured one. The bar should show
-          // what the battery is doing, and those differ exactly when
-          // something has gone wrong and is worth seeing.
+          // The hardware reading is used rather than the configured one,
+          // because the bar should show what the battery is doing. The two
+          // differ only when something has gone wrong, which is precisely
+          // when the difference is worth seeing.
           root.cap = Number(rep.hardwareLimit) || 0
           root.travelling = rep.effectiveSource === "travel"
         } catch (e) {
@@ -105,8 +107,9 @@ BarWidget {
     }
   }
 
-  // Cheap: three or four reads under /sys and no network, so this can afford
-  // to run while the panel is closed, which is what keeps the bar honest.
+  // This costs three or four reads under /sys and no network access, so it can
+  // afford to run while the panel is closed. That is what keeps the figure in
+  // the bar current.
   Timer {
     running: true
     interval: root.refreshMs
@@ -120,19 +123,20 @@ BarWidget {
     id: button
     anchors.fill: parent
     bar: root.bar
-    // Written as a ceiling rather than as a bare number. The bar's own power
-    // widget sits next to this one by default and reads "99%", and two
-    // adjacent numbers with nothing to tell them apart read as one number.
-    // The relation is also what the figure actually means.
+    // The figure is written as a ceiling rather than as a bare number. The
+    // bar's own power widget sits next to this one by default and reads
+    // "99%", and two adjacent numbers with nothing to distinguish them are
+    // easily read as one. The relation is also what the figure means.
     text: root.labelled ? root.glyph + " ≤" + root.cap : root.glyph
-    // The same doubling the power widget uses when it carries a percentage.
-    // Without it the label is squeezed into a slot sized for one glyph.
+    // This is the same doubling the power widget uses when it carries a
+    // percentage. Without it the label is squeezed into a slot sized for a
+    // single glyph.
     slotSize: Style.bar.iconSlot * (root.labelled ? 2 : 1)
 
-    // The one state worth colouring. A travel cap is temporary by
-    // construction, and the whole point of it expiring is that you are not
-    // supposed to have to remember it. Colour here cannot go stale the way a
-    // network verdict can: it is re-read from a local file every few seconds.
+    // A travel cap is the one state worth colouring. It is temporary by
+    // construction, and the reason it expires is that the user should not have
+    // to remember it. The colour cannot become stale the way a network verdict
+    // can, because it is re-read from a local file every few seconds.
     useActiveColor: true
     active: root.travelling
 

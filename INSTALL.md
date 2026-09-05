@@ -22,13 +22,14 @@ Check the attribute is there before installing anything:
 cat /sys/class/power_supply/*/charge_control_end_threshold
 ```
 
-A number means you are set. "No such file or directory" means no driver on this
-machine exposes a charge threshold. On ASUS hardware that usually means the
-`asus_nb_wmi` module is not loaded, which `lsmod | grep asus_nb_wmi` will tell
-you. On other hardware it more often means the vendor's driver does not offer
-one, or offers it only on a newer kernel. See the hardware support section of
-[README.md](README.md#hardware-support), which also covers the ThinkPad start
-threshold, machines with two packs, and batteries not named `BAT*`.
+A number means the machine is supported. "No such file or directory" means that
+no driver on this machine exposes a charge threshold. On an ASUS laptop that
+usually means the `asus_nb_wmi` module is not loaded, which
+`lsmod | grep asus_nb_wmi` will confirm. On other hardware it more often means
+that the vendor's driver does not provide a threshold, or provides one only on
+a newer kernel. The hardware support section of
+[README.md](README.md#hardware-support) describes what is handled on machines
+other than the one this was written on.
 
 ## Installing
 
@@ -63,7 +64,7 @@ development checkout can be moved without breaking the machine.
 | Path | Purpose |
 |---|---|
 | `/etc/omarchy-battery-limit.conf` | the standing cap and any travel override, as integers. Owned `root:wheel`, mode 664 |
-| `/etc/udev/rules.d/99-omarchy-battery-limit.rules` | gives the `wheel` group write access to the threshold, on every boot |
+| `/etc/udev/rules.d/99-omarchy-battery-limit.rules` | gives the `wheel` group write access to the charge thresholds, on every boot |
 | `/usr/local/lib/omarchy-battery-limit/apply` | a POSIX sh helper that puts the configured cap back |
 | `/etc/systemd/system/omarchy-battery-limit.service` | applies the cap at boot |
 | `/etc/systemd/system/omarchy-battery-limit-resume.service` | reapplies it after suspend or hibernate |
@@ -76,8 +77,14 @@ an existing config file alone.
 
 It grants access to the `wheel` group rather than to your user, because udev
 sets a group on the attribute and cannot set an ACL entry for one account. On
-this machine `wheel` is already the group with sudo, so it grants nothing that
-was not available with a password.
+this machine `wheel` is already the group that has sudo, so this grants nothing
+that was not available with a password.
+
+The rule matches batteries by device type rather than by name, so it also
+covers hardware that does not call its pack `BAT0`. It grants both
+`charge_control_end_threshold` and, where the driver provides one,
+`charge_control_start_threshold`, which some drivers require to be lowered
+before they will accept a lower cap.
 
 
 ## Installing for development
@@ -162,7 +169,7 @@ o.bind("SUPER SHIFT", "B", "Charge to full for travel",
 
 **The panel says the threshold is not writable.** The privileged step has not
 been run, or it ran before the current boot. Run it, and confirm with
-`ls -l /sys/class/power_supply/BAT*/charge_control_end_threshold`, which should
+`ls -l /sys/class/power_supply/*/charge_control_end_threshold`, which should
 show group `wheel` and mode `-rw-rw-r--`.
 
 **The cap is right but the panel says it will not survive a reboot.** The udev
@@ -182,7 +189,7 @@ this hardware it reports a 75-80% pair that it would apply if asked, alongside
 `ChargeThresholdEnabled = false`, and it never reads the threshold the firmware
 is actually holding. So the fallback is dead code and the stock panel reports a
 limit that is not in force. The cap that is in force is whatever
-`cat /sys/class/power_supply/BAT*/charge_control_end_threshold` says, which is
+`cat /sys/class/power_supply/*/charge_control_end_threshold` says, which is
 what this plugin reads directly.
 
 **The panel shows a cap that disagrees with what is configured.** Something
@@ -190,10 +197,23 @@ reset the threshold since the last apply. `battery-limit apply` puts the
 configured value back, and `systemctl status omarchy-battery-limit.timer` will
 say whether the ten-minute check is running.
 
-**Charge sits below the cap and will not climb.** ASUS firmware does not
-restart charging the moment you lower and raise the cap; it waits for the
-charge to fall a few percent below the new ceiling first. Unplugging briefly
-prompts it.
+**Charge sits below the cap and will not climb.** Firmware generally does not
+restart charging the moment the cap is raised. It waits for the charge to fall
+some way below the new ceiling first. Unplugging the machine briefly prompts
+it.
+
+**Setting a lower cap fails with an invalid argument.** Some drivers,
+`thinkpad_acpi` among them, refuse an end threshold below
+`charge_control_start_threshold`, the charge at which the machine resumes
+charging. The tool lowers that value five points below the new cap and retries,
+so this should only be seen when the start threshold itself is not writable.
+Check it with
+`ls -l /sys/class/power_supply/*/charge_control_start_threshold`, and run the
+installer again if it is not owned by the `wheel` group.
+
+**The two batteries report different caps.** The cap is set on every pack that
+exposes a threshold, so this means something else changed one of them. Run
+`battery-limit apply` to put the configured value back on both.
 
 **The health figure looks wrong.** It is capacity now against capacity when
 new, as the battery itself reports them. A pack that has not been through a
@@ -223,6 +243,6 @@ deletes `/etc/omarchy-battery-limit.conf`. Uninstalling leaves the cap in force
 rather than silently returning the machine to charging to full. To lift it:
 
 ```bash
-echo 100 | sudo tee /sys/class/power_supply/BAT*/charge_control_end_threshold
+echo 100 | sudo tee /sys/class/power_supply/*/charge_control_end_threshold
 sudo rm /etc/omarchy-battery-limit.conf
 ```

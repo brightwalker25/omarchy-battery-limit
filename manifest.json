@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "brightwalker25.battery-limit",
   "name": "Battery Limit",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "brightwalker25",
   "license": "MIT",
   "description": "Cap the charge on your battery to preserve it, and raise the cap for travel with an override that expires on its own",

@@ -9,19 +9,19 @@ import qs.Ui
 // (https://github.com/basecamp/omarchy, MIT, Copyright (c) David Heinemeier
 // Hansson). See LICENSE for the full notice.
 
-// The panel behind the bar glyph: what the battery is capped at, what it has
-// left to give, and the controls to change the cap.
+// The panel behind the bar glyph. It shows what the battery is capped at and
+// what it has left to give, and it carries the controls that change the cap.
 //
-// The layout separates the two things a cap is for. The row of standing caps
-// is the decision you make once and leave alone. The travel button underneath
-// is the exception you make on a particular day, and it is the only control
-// that reaches 100%, because a cap you set and forget at 100% is the state
-// this plugin exists to get you out of.
+// The layout separates the two purposes a cap serves. The row of standing caps
+// is the decision made once and then left alone. The travel button underneath
+// is the exception made on a particular day, and it is the only control that
+// reaches 100%, because a cap set to 100% and forgotten is the situation this
+// plugin is meant to prevent.
 //
-// It renders whatever `bin/battery-limit` hands it and decides nothing itself.
-// Which limit is in force, whether a travel override has run out, whether the
-// firmware honoured the request: all of that is settled in that script, which
-// runs fine from a terminal with no compositor involved.
+// The panel renders whatever `bin/battery-limit` reports and decides nothing
+// itself. Which limit is in force, whether a travel override has run out, and
+// whether the firmware accepted the request are all determined in that script,
+// which can be run from a terminal with no compositor involved.
 Panel {
   id: root
   moduleName: "brightwalker25.battery-limit"
@@ -38,7 +38,8 @@ Panel {
 
   // Fixed rather than drawn from the theme, for the same reason the vpn-check
   // panel fixes its own: a theme is free to define its urgent colour as a soft
-  // pink, and a warning that reads as decoration is not a warning.
+  // pink, and a warning rendered in a decorative colour does not read as a
+  // warning.
   readonly property color okColor: "#3fb950"
   readonly property color warnColor: "#d29922"
   readonly property color badColor: "#f85149"
@@ -46,8 +47,9 @@ Panel {
   readonly property int refreshMs: Math.max(2000, Number(setting("refreshIntervalMs", 10000)))
   readonly property string travelDuration: String(setting("travelDuration", "24 hours"))
 
-  // Parsed defensively. This is a free-text setting, and a typo in it should
-  // cost the user one odd-looking button, not a panel that fails to load.
+  // This is parsed defensively, because it is a free-text setting and a typo
+  // in it should cost the user one odd-looking button rather than a panel that
+  // fails to load.
   readonly property var presets: {
     var raw = String(setting("presets", "60, 70, 80, 90")).split(",")
     var out = []
