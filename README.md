@@ -119,11 +119,6 @@ Any laptop whose kernel driver provides `charge_control_end_threshold` under
 other vendors. The battery is found by looking for that attribute rather than
 by assuming `BAT0`.
 
-## License
-
-MIT. See [LICENSE](LICENSE), which also carries the notice for the Omarchy
-plugins this widget's scaffolding is derived from.
-
 ## Why Omarchy's own battery panel disagrees
 
 The stock `omarchy.power` panel will report a different limit from this one,
@@ -144,3 +139,8 @@ re-read the value: `Refresh()` is not implemented on the device interface, and
 udev event does not help either, which was tried before the cause was
 understood. The fix belongs in `omarchy-battery-status`, which should either
 prefer sysfs or check `ChargeThresholdEnabled` before trusting UPower's pair.
+
+## License
+
+MIT. See [LICENSE](LICENSE), which also carries the notice for the Omarchy
+plugins this widget's scaffolding is derived from.
