@@ -114,6 +114,15 @@ Panel {
     return "for another " + Math.round(left / 86400) + " days"
   }
 
+  // The override reads as one sentence rather than as a phrase bolted onto a
+  // duration, because an override with no expiry and one that expires on a
+  // timer are different statements.
+  function travelSentence() {
+    if (!rep || rep.travelUntil === null || rep.travelUntil === undefined)
+      return "This override lasts until you end it."
+    return "This override runs " + fmtTravel() + ", then ends on its own."
+  }
+
   function durationFlag() {
     var d = root.travelDuration
     if (d.indexOf("8") === 0) return "8h"
@@ -431,11 +440,14 @@ Panel {
                 if (!root.supported) return "This machine does not expose a charge threshold."
                 if (root.travelling) {
                   var s = "Raised for travel " + root.fmtTravel()
-                  if (root.standingLimit > 0) s += ", then back to " + root.standingLimit + "%"
-                  return s
+                  if (root.standingLimit > 0)
+                    s += ". The limit then returns to " + root.standingLimit + "%"
+                  return s + "."
                 }
-                if (root.shownLimit >= 100) return "Charging to full. Nothing is being held back."
-                if (root.shownLimit > 0) return "Charging stops here and holds."
+                if (root.shownLimit >= 100)
+                  return "The battery charges to full, with no limit in force."
+                if (root.shownLimit > 0)
+                  return "The battery charges to this level and then stops."
                 return ""
               }
               color: root.dim
@@ -540,7 +552,7 @@ Panel {
               bordered: true
               selected: root.travelling
               text: root.travelling
-                ? "Back to " + (root.standingLimit > 0 ? root.standingLimit + "%" : "the standing limit")
+                ? "Return to " + (root.standingLimit > 0 ? root.standingLimit + "%" : "the standing limit")
                 : "Charge to 100% for travel"
               iconText: root.travelling ? "󰁽" : "󰂅"
               foreground: root.travelling ? root.foreground : root.warnColor
@@ -557,11 +569,12 @@ Panel {
               textFormat: Text.PlainText
               width: parent.width
               text: root.travelling
-                ? "Reverts on its own " + root.fmtTravel() + ". Click again to end it now."
-                : ("Lasts " + root.travelDuration.toLowerCase()
-                   + ", then reverts to "
+                ? root.travelSentence() + " Click again to end it now."
+                : ("This lasts " + root.travelDuration.toLowerCase()
+                   + ", after which the limit returns to "
                    + (root.standingLimit > 0 ? root.standingLimit + "%" : "your standing limit")
-                   + " on its own. Change the duration in this widget's settings.")
+                   + " on its own. The duration can be changed in this widget's"
+                   + " settings.")
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption

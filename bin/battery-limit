@@ -303,7 +303,7 @@ def snapshot():
     elif not setup["persists"]:
         rep["warnings"].append(
             "The limit can be changed but will not survive a reboot. Run the "
-            "installer once with sudo to make it stick.")
+            "installer once with sudo to make it persist.")
 
     return rep
 
@@ -518,7 +518,7 @@ def as_text(rep):
         if rep["effectiveSource"] == "travel":
             line += " (travel, %s)" % fmt_expiry(rep["travelUntil"])
             if rep["configuredLimit"] is not None:
-                line += ", then back to %d%%" % rep["configuredLimit"]
+                line += ", after which it returns to %d%%" % rep["configuredLimit"]
         elif limit is None:
             line += " (nothing configured)"
         out.append(line)
@@ -534,8 +534,10 @@ def as_text(rep):
         out.append(health_line)
         setup = rep["setup"]
         out.append("Setup: %s, %s" % (
-            "settable without sudo" if setup["writable"] else "NOT settable",
-            "survives reboot" if setup["persists"] else "does NOT survive reboot"))
+            "settable without sudo" if setup["writable"]
+            else "not settable without sudo",
+            "survives a reboot" if setup["persists"]
+            else "does not survive a reboot"))
     for w in rep["warnings"]:
         out.append("! " + w)
     return "\n".join(out)

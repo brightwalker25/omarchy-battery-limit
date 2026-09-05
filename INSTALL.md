@@ -155,15 +155,21 @@ one row.
 ## Binding it to a key
 
 The panel answers on IPC, including two actions that need no panel at all, so
-travel mode can be turned on from a keybinding on the way out of the door:
+travel mode can be turned on from a keybinding on the way out of the door. Add
+this to `~/.config/hypr/bindings.lua`:
 
 ```lua
-o.bind("SUPER SHIFT", "B", "Charge to full for travel",
+o.bind("SUPER + SHIFT + B", "Charge to full for travel",
   "omarchy-shell brightwalker25.battery-limit travel")
 ```
 
-`standing` ends the override, `toggle` opens and closes the panel, and
-`refresh` re-reads the battery.
+The available actions are `travel` to raise the cap, `standing` to end the
+override, `toggle`, `open` and `close` for the panel, and `refresh` to re-read
+the battery. Any of them can be called directly:
+
+```bash
+omarchy-shell brightwalker25.battery-limit standing
+```
 
 ## Troubleshooting
 
