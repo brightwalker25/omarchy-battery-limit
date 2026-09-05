@@ -145,8 +145,14 @@ Panel {
     if (root.hostWidget && root.hostWidget.refresh) root.hostWidget.refresh()
   }
 
+  // None of these gate on root.settable, and that is deliberate. The controls
+  // in the panel are already disabled when the limit cannot be set, so the
+  // only callers that reach here without a usable snapshot are the IPC
+  // actions, which are meant to work from a keybinding on a panel that has
+  // never been opened. The CLI refuses an impossible write by itself and says
+  // why, and that message is worth more than a silent no-op.
   function setLimit(value) {
-    if (writer.running || !root.settable) return
+    if (writer.running) return
     root.pending = value
     root.busy = true
     writer.argv = ["set", String(value)]
@@ -154,7 +160,7 @@ Panel {
   }
 
   function setTravel() {
-    if (writer.running || !root.settable) return
+    if (writer.running) return
     root.pending = 100
     root.busy = true
     writer.argv = ["set", "100", "--for", root.durationFlag()]
@@ -162,7 +168,7 @@ Panel {
   }
 
   function clearTravel() {
-    if (writer.running || !root.settable) return
+    if (writer.running) return
     root.busy = true
     writer.argv = ["clear-travel"]
     writer.running = true
@@ -216,6 +222,11 @@ Panel {
     triggeredOnStart: true
     onTriggered: root.poll()
   }
+
+  // One read at startup, so the panel has a snapshot to draw before it is
+  // first opened. Without it the first frame after a click is empty, and the
+  // travel readouts an IPC action leaves behind have nothing to attach to.
+  Component.onCompleted: root.poll()
 
   // ------------------------------------------------------- open/close contract
 

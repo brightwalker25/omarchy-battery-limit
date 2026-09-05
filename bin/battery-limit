@@ -144,17 +144,21 @@ def write_conf(conf):
         "" if conf["travel_limit"] is None else conf["travel_limit"],
         "" if conf["travel_until"] is None else conf["travel_until"],
     )
-    tmp = CONF + ".tmp"
-    try:
-        with open(tmp, "w") as fh:
-            fh.write(body)
-        os.replace(tmp, CONF)
-    except OSError as exc:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise exc
+    # Written in place, into the existing inode, rather than through the usual
+    # write-a-temp-file-and-rename dance. That pattern needs permission to
+    # create and unlink files in /etc, which this process does not have and
+    # should not be given: the whole privilege model here is one
+    # group-writable file, not a writable /etc. Opening "r+" also keeps the
+    # root:wheel ownership and the 664 mode that the installer set, which a
+    # freshly created file would not inherit.
+    #
+    # The cost is that the write is not atomic. It is one short buffer written
+    # in a single call, and the reader on the other side accepts only complete
+    # lines of digits and applies nothing when it finds none, so a torn write
+    # loses the setting rather than corrupting the machine's idea of it.
+    with open(CONF, "r+") as fh:
+        fh.write(body)
+        fh.truncate()
     return True
 
 
