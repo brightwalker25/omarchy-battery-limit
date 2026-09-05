@@ -19,12 +19,16 @@ see the [README](README.md).
 Check the attribute is there before installing anything:
 
 ```bash
-cat /sys/class/power_supply/BAT*/charge_control_end_threshold
+cat /sys/class/power_supply/*/charge_control_end_threshold
 ```
 
-A number means you are set. "No such file or directory" on an ASUS machine
-usually means the `asus_nb_wmi` module is not loaded; check with
-`lsmod | grep asus_nb_wmi`.
+A number means you are set. "No such file or directory" means no driver on this
+machine exposes a charge threshold. On ASUS hardware that usually means the
+`asus_nb_wmi` module is not loaded, which `lsmod | grep asus_nb_wmi` will tell
+you. On other hardware it more often means the vendor's driver does not offer
+one, or offers it only on a newer kernel. See the hardware support section of
+[README.md](README.md#hardware-support), which also covers the ThinkPad start
+threshold, machines with two packs, and batteries not named `BAT*`.
 
 ## Installing
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read and set the ASUS charge threshold, for the brightwalker25.battery-limit
+"""Read and set the battery charge threshold, for the brightwalker25.battery-limit
 bar panel and for use from a terminal.
 
 Design notes:
@@ -464,7 +464,7 @@ def main():
 
     p = argparse.ArgumentParser(
         prog="battery-limit", parents=[common],
-        description="Read and set the ASUS battery charge limit.")
+        description="Read and set the battery charge limit.")
     sub = p.add_subparsers(dest="command")
 
     sub.add_parser("status", parents=[common],

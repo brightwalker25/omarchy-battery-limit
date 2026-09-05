@@ -108,16 +108,77 @@ it does, and the resume unit is insurance that costs one file write.
 
 | Needed | Used for |
 |---|---|
-| An ASUS laptop with `asus_nb_wmi` loaded | the `charge_control_end_threshold` attribute |
+| A battery exposing `charge_control_end_threshold` | the cap itself |
 | Omarchy shell with plugin support | the bar widget and panel |
 | Python 3 | the CLI |
 | systemd | reapplying the cap at boot, on resume, and expiring the override |
 
-Nothing here is specific to ASUS beyond the driver that exposes the attribute.
-Any laptop whose kernel driver provides `charge_control_end_threshold` under
-`/sys/class/power_supply` will work, which includes most ThinkPads and several
-other vendors. The battery is found by looking for that attribute rather than
-by assuming `BAT0`.
+## Hardware support
+
+Nothing here is specific to any vendor beyond the driver that exposes the
+attribute. The battery is found by scanning `/sys/class/power_supply` for a
+node whose `type` is `Battery` and which carries
+`charge_control_end_threshold`, rather than by assuming `BAT0`, so in principle
+this works on any laptop whose kernel driver provides that file. One command
+settles it on a given machine:
+
+```bash
+cat /sys/class/power_supply/*/charge_control_end_threshold
+```
+
+A number means the hardware side is there. Nothing at all means this plugin
+has nothing to drive, and the panel will say so rather than pretending.
+
+What follows is the honest boundary of that claim.
+
+It has only been used on one machine, an ASUS Zenbook with `asus_nb_wmi`
+loaded. Everything below is read off the code and the kernel drivers rather
+than off hardware in hand, so treat it as where to look first when something
+misbehaves, not as a support matrix.
+
+On ThinkPads the driver also exposes `charge_control_start_threshold`, and it
+rejects an end threshold below the current start threshold. This plugin reads
+the start threshold for display but never writes it, so if something has
+already set one, typically TLP or the firmware itself, lowering the cap past it
+fails and the panel reports the write error rather than the reason. Clearing or
+lowering the start threshold by hand is the workaround. ThinkPad firmware also
+keeps thresholds across a reboot on its own, which makes the boot and resume
+units redundant there rather than harmful.
+
+If the battery is not named `BAT0`, `BAT1` and so on, the udev rule will not
+match it. The rule keys on `KERNEL=="BAT*"`, while the CLI accepts any node of
+the right type, so on hardware that names the pack something else the panel
+reads correctly and then refuses every write, pointing at an installer that has
+already been run.
+
+With two packs the two halves disagree. The panel and `status` act on the first
+battery that carries the attribute, while the root helper that runs at boot
+writes every one it can. On a machine with an external or secondary pack, the
+boot cap and the panel cap cover different hardware.
+
+Some vendors expose no such attribute. Many Lenovo IdeaPads offer a
+`conservation_mode` toggle on the platform device instead, which is a fixed
+preset rather than a threshold and is not something this reads. Support for
+Dell, Framework, MSI, System76 and Samsung arrived in different kernel versions
+through different drivers, so on those the answer depends on the kernel rather
+than on this plugin.
+
+On a desktop, or any machine with no battery at all, the widget still draws its
+glyph and the panel carries a warning. It does not break; it just has nothing
+to say.
+
+The firmware remains the authority throughout. It is free to quantise a
+requested cap to its own steps, to refuse a value outright, or to hold the
+charge below the cap and decline to top it up, and none of that is something
+this can override. Every write is read back and it is the read-back that is
+displayed, so what the panel shows is what the battery is holding. What this
+cannot do is charge past a cap the firmware enforces elsewhere, discharge a
+pack down to a target, or schedule anything by time of day.
+
+The installer assumes an Arch-shaped system: `wheel` as the administrative
+group, udev under `/etc/udev/rules.d`, and systemd. It is an Omarchy plugin, so
+that is a fair assumption, but on a Debian-derived system the group would need
+to be `sudo`.
 
 ## Why Omarchy's own battery panel disagrees
 

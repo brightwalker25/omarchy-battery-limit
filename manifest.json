@@ -5,7 +5,7 @@
   "version": "0.1.0",
   "author": "brightwalker25",
   "license": "MIT",
-  "description": "Cap the charge on an ASUS battery to preserve it, and raise the cap for travel with an override that expires on its own",
+  "description": "Cap the charge on your battery to preserve it, and raise the cap for travel with an override that expires on its own",
   "kinds": [
     "bar-widget"
   ],
