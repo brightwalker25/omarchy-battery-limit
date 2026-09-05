@@ -75,6 +75,7 @@ sets a group on the attribute and cannot set an ACL entry for one account. On
 this machine `wheel` is already the group with sudo, so it grants nothing that
 was not available with a password.
 
+
 ## Installing for development
 
 Working on the plugin means running it from a checkout rather than from a clone
@@ -168,6 +169,17 @@ interrupted. Run it again.
 rounded it. This is reported rather than hidden: the panel shows the value the
 battery actually holds. Use one of the presets, which are round numbers most
 firmware accepts as given.
+
+**Omarchy's own battery panel shows a different limit from this one.** It is
+wrong and this one is right, and nothing you can configure will reconcile them.
+`omarchy-battery-status` reads `charge-end-threshold` from UPower and falls back
+to sysfs only when UPower returns nothing. UPower always returns something: on
+this hardware it reports a 75-80% pair that it would apply if asked, alongside
+`ChargeThresholdEnabled = false`, and it never reads the threshold the firmware
+is actually holding. So the fallback is dead code and the stock panel reports a
+limit that is not in force. The cap that is in force is whatever
+`cat /sys/class/power_supply/BAT*/charge_control_end_threshold` says, which is
+what this plugin reads directly.
 
 **The panel shows a cap that disagrees with what is configured.** Something
 reset the threshold since the last apply. `battery-limit apply` puts the

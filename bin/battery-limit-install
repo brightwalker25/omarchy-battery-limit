@@ -91,6 +91,13 @@ chmod 664 "$CONF"
 # not reach them. chgrp and chmod through RUN is the way this is done, and it
 # has to run on every add so that the ownership is restored after a boot, a
 # module reload or a battery that comes back as a new device.
+#
+# One file, not two. Granting the battery's `uevent` as well was tried, on the
+# theory that a synthetic udev event would make UPower re-read the threshold
+# and stop Omarchy's own battery panel from disagreeing with this one. It does
+# not: UPower never reads the hardware threshold, so no event changes what it
+# reports. See the note in the README. A privilege that buys nothing is not
+# worth granting.
 cat > "$RULE" <<EOF
 # Let the $GROUP group set the ASUS charge threshold without a password.
 # Installed by battery-limit-install. Removed by --uninstall.

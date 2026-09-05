@@ -189,8 +189,7 @@ def setup_state(battery):
     attr = os.path.join(battery, LIMIT_ATTR) if battery else None
     return {
         "writable": bool(attr and os.access(attr, os.W_OK)),
-        "configWritable": os.access(CONF, os.W_OK) if os.path.exists(CONF)
-                          else os.access(os.path.dirname(CONF), os.W_OK),
+        "configWritable": os.access(CONF, os.W_OK),
         "persists": os.path.exists(APPLY_HELPER),
     }
 

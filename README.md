@@ -123,3 +123,24 @@ by assuming `BAT0`.
 
 MIT. See [LICENSE](LICENSE), which also carries the notice for the Omarchy
 plugins this widget's scaffolding is derived from.
+
+## Why Omarchy's own battery panel disagrees
+
+The stock `omarchy.power` panel will report a different limit from this one,
+and it is the stock panel that is wrong. `omarchy-battery-status` reads
+`charge-end-threshold` from UPower and falls back to sysfs only when UPower
+returns nothing. UPower always returns something. On this hardware it reports a
+75-80% pair alongside `ChargeThresholdEnabled = false`, which are the values it
+would apply if something asked it to, not a reading of the firmware. Setting
+the threshold to 60, 70 or 95 does not move them.
+
+So the sysfs fallback never runs, and the stock panel reports a limit that is
+not in force. This plugin reads sysfs directly and reports what the battery is
+actually holding.
+
+There is no way to fix this from outside Omarchy. UPower has no method to
+re-read the value: `Refresh()` is not implemented on the device interface, and
+`EnableChargeThreshold` only toggles UPower's own preset. Raising a synthetic
+udev event does not help either, which was tried before the cause was
+understood. The fix belongs in `omarchy-battery-status`, which should either
+prefer sysfs or check `ChargeThresholdEnabled` before trusting UPower's pair.
