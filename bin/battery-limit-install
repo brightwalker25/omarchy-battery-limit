@@ -1,0 +1,228 @@
+#!/usr/bin/env bash
+#
+# Install the system side of the battery limit: the udev rule that lets you
+# set the threshold without a password, and the units that put it back after a
+# reboot or a resume.
+#
+# Everything written here is self-contained. Nothing points back at the plugin
+# directory, so the cap keeps holding if the plugin is later removed, and a
+# development checkout can be moved without breaking the machine.
+#
+# Run once:   sudo ./bin/battery-limit-install
+# Undo:       sudo ./bin/battery-limit-install --uninstall
+
+set -euo pipefail
+
+CONF=/etc/omarchy-battery-limit.conf
+RULE=/etc/udev/rules.d/99-omarchy-battery-limit.rules
+LIBDIR=/usr/local/lib/omarchy-battery-limit
+HELPER="$LIBDIR/apply"
+UNITDIR=/etc/systemd/system
+GROUP=wheel
+
+# The account that will be setting the limit. The script runs under sudo, so
+# $USER is root and the name has to come from the invoking environment.
+TARGET_USER="${SUDO_USER:-${PKEXEC_UID:+$(id -nu "$PKEXEC_UID")}}"
+
+die() { printf '%s\n' "$*" >&2; exit 1; }
+
+[[ $EUID -eq 0 ]] || die "This has to run as root: sudo $0 $*"
+
+uninstall() {
+  systemctl disable --now omarchy-battery-limit.timer >/dev/null 2>&1 || true
+  systemctl disable omarchy-battery-limit.service >/dev/null 2>&1 || true
+  systemctl disable omarchy-battery-limit-resume.service >/dev/null 2>&1 || true
+  rm -f "$UNITDIR/omarchy-battery-limit.service" \
+        "$UNITDIR/omarchy-battery-limit-resume.service" \
+        "$UNITDIR/omarchy-battery-limit.timer" \
+        "$RULE"
+  rm -rf "$LIBDIR"
+  systemctl daemon-reload
+  udevadm control --reload-rules || true
+
+  echo "Removed the udev rule and the units."
+  echo "Left in place: $CONF, and the current threshold on the battery itself."
+  echo "To lift the cap entirely: echo 100 | sudo tee /sys/class/power_supply/BAT*/charge_control_end_threshold"
+  exit 0
+}
+
+if [[ "${1:-}" == "--uninstall" ]]; then uninstall; fi
+
+# --------------------------------------------------------------- preflight
+
+shopt -s nullglob
+batteries=(/sys/class/power_supply/*/charge_control_end_threshold)
+shopt -u nullglob
+[[ ${#batteries[@]} -gt 0 ]] || die \
+  "No battery here exposes charge_control_end_threshold. On ASUS hardware,
+check that the asus_nb_wmi module is loaded: lsmod | grep asus_nb_wmi"
+
+[[ -n "$TARGET_USER" ]] || die \
+  "Cannot tell which account to grant access to. Run this with sudo rather
+than from a root shell, or set SUDO_USER."
+
+if ! id -nG "$TARGET_USER" | tr ' ' '\n' | grep -qx "$GROUP"; then
+  die "$TARGET_USER is not in the '$GROUP' group, so granting the group access
+would not help. Add them first: usermod -aG $GROUP $TARGET_USER"
+fi
+
+# --------------------------------------------------------------- config file
+
+if [[ ! -f "$CONF" ]]; then
+  cat > "$CONF" <<'EOF'
+# Written by battery-limit. Values are integers; anything else is
+# ignored by the root helper that reads this file at boot and on
+# resume. Edit by hand if you like, or use `battery-limit set`.
+#
+# LIMIT         the standing charge cap, in percent
+# TRAVEL_LIMIT  a temporary cap that overrides it, empty when unused
+# TRAVEL_UNTIL  epoch seconds the override expires, empty for never
+LIMIT=80
+TRAVEL_LIMIT=
+TRAVEL_UNTIL=
+EOF
+fi
+chgrp "$GROUP" "$CONF"
+chmod 664 "$CONF"
+
+# --------------------------------------------------------------- udev rule
+
+# Sysfs attributes are not device nodes, so udev's own GROUP and MODE keys do
+# not reach them. chgrp and chmod through RUN is the way this is done, and it
+# has to run on every add so that the ownership is restored after a boot, a
+# module reload or a battery that comes back as a new device.
+cat > "$RULE" <<EOF
+# Let the $GROUP group set the ASUS charge threshold without a password.
+# Installed by battery-limit-install. Removed by --uninstall.
+ACTION=="add", SUBSYSTEM=="power_supply", KERNEL=="BAT*", \\
+  RUN+="/bin/sh -c 'chgrp $GROUP /sys%p/charge_control_end_threshold 2>/dev/null; chmod 664 /sys%p/charge_control_end_threshold 2>/dev/null; exit 0'"
+EOF
+
+# --------------------------------------------------------------- root helper
+
+# Deliberately POSIX sh with no dependency on the plugin, and deliberately
+# parsing rather than sourcing the config. The file is group-writable so the
+# panel can change it without a password, and sourcing a group-writable file
+# as root would turn "can set a charge limit" into "can run anything as root".
+# Reading only digits out of it closes that.
+install -d -m 755 "$LIBDIR"
+cat > "$HELPER" <<'EOF'
+#!/bin/sh
+# Put the configured charge limit back on the battery. Called at boot, after
+# resume, and every ten minutes so that a travel override expires on its own.
+#
+# Reads /etc/omarchy-battery-limit.conf, which is group-writable, so it
+# accepts integers and nothing else. Never sources it.
+set -u
+CONF=/etc/omarchy-battery-limit.conf
+[ -r "$CONF" ] || exit 0
+
+getval() { sed -n "s/^$1=\([0-9][0-9]*\)\$/\1/p" "$CONF" | tail -n1; }
+
+LIMIT=$(getval LIMIT)
+TRAVEL_LIMIT=$(getval TRAVEL_LIMIT)
+TRAVEL_UNTIL=$(getval TRAVEL_UNTIL)
+
+value=$LIMIT
+if [ -n "$TRAVEL_LIMIT" ]; then
+  if [ -z "$TRAVEL_UNTIL" ] || [ "$(date +%s)" -lt "$TRAVEL_UNTIL" ]; then
+    value=$TRAVEL_LIMIT
+  else
+    # The override has run out. Retire it here rather than leaving it to the
+    # next panel that happens to open, so the revert happens on a machine
+    # nobody is looking at.
+    sed -i -e 's/^TRAVEL_LIMIT=.*/TRAVEL_LIMIT=/' \
+           -e 's/^TRAVEL_UNTIL=.*/TRAVEL_UNTIL=/' "$CONF" 2>/dev/null || true
+  fi
+fi
+
+[ -n "$value" ] || exit 0
+case $value in *[!0-9]*) exit 0 ;; esac
+[ "$value" -ge 40 ] && [ "$value" -le 100 ] || exit 0
+
+for attr in /sys/class/power_supply/*/charge_control_end_threshold; do
+  [ -w "$attr" ] || continue
+  printf '%s\n' "$value" > "$attr" 2>/dev/null || true
+done
+exit 0
+EOF
+chmod 755 "$HELPER"
+
+# --------------------------------------------------------------- units
+
+# Three units rather than one, because they answer to different events and a
+# single oneshot cannot. In particular a service with RemainAfterExit=yes is
+# already active when the machine resumes, so systemd will not run it again;
+# the resume reapply has to be its own unit.
+cat > "$UNITDIR/omarchy-battery-limit.service" <<EOF
+[Unit]
+Description=Apply the configured battery charge limit
+After=multi-user.target
+ConditionPathExists=$CONF
+
+[Service]
+Type=oneshot
+ExecStart=$HELPER
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+cat > "$UNITDIR/omarchy-battery-limit-resume.service" <<EOF
+[Unit]
+Description=Reapply the battery charge limit after resume
+After=suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
+ConditionPathExists=$CONF
+
+[Service]
+Type=oneshot
+ExecStart=$HELPER
+
+[Install]
+WantedBy=suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
+EOF
+
+cat > "$UNITDIR/omarchy-battery-limit.timer" <<EOF
+[Unit]
+Description=Expire a battery charge limit travel override on time
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=10min
+AccuracySec=1min
+Unit=omarchy-battery-limit.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
+systemctl daemon-reload
+systemctl enable omarchy-battery-limit.service >/dev/null
+systemctl enable omarchy-battery-limit-resume.service >/dev/null
+systemctl enable --now omarchy-battery-limit.timer >/dev/null
+
+# --------------------------------------------------------------- apply now
+
+udevadm control --reload-rules
+udevadm trigger --subsystem-match=power_supply --action=add
+# udev runs the RUN handlers asynchronously; give them a moment before the
+# check below reports on permissions they are still in the middle of setting.
+udevadm settle --timeout=5 || true
+
+"$HELPER"
+
+echo "Installed."
+echo
+for attr in "${batteries[@]}"; do
+  bat=$(basename "$(dirname "$attr")")
+  now=$(cat "$attr" 2>/dev/null || echo '?')
+  if runuser -u "$TARGET_USER" -- test -w "$attr"; then
+    perms="settable by $TARGET_USER without sudo"
+  else
+    perms="NOT yet writable by $TARGET_USER, a reboot will fix it"
+  fi
+  echo "  $bat capped at ${now}%, $perms"
+done
+echo
+echo "The limit is reapplied at boot, after every resume, and checked every"
+echo "ten minutes so a travel override expires on its own."

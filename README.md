@@ -1,0 +1,125 @@
+# omarchy-battery-limit
+
+A charge cap for the Omarchy bar. The glyph shows the ceiling your battery is
+charging to, and the panel behind it sets that ceiling: four standing caps on a
+row, a slider for the values between them, and one button that raises the cap
+to 100% for travel and then puts it back on its own.
+
+```bash
+omarchy plugin add https://github.com/brightwalker25/omarchy-battery-limit.git
+omarchy plugin enable brightwalker25.battery-limit --section right
+sudo ~/.config/omarchy/plugins/brightwalker25.battery-limit/bin/battery-limit-install
+```
+
+The third line is the one that matters and it runs once. It grants your account
+the right to set the threshold without a password, and installs the units that
+put the cap back after a reboot or a resume. Without it the panel opens, reads
+correctly, and refuses every change with the reason why.
+[INSTALL.md](INSTALL.md) covers what that step writes, the development install,
+running the tool from a terminal, and uninstalling.
+
+## Why cap at all
+
+Lithium cells age from time spent at a high state of charge, and a laptop that
+lives on mains spends nearly all of its life there. Holding the charge at 60%
+rather than 100% slows that down substantially. The cost is a smaller reserve
+on the days you unplug, which is what the travel button is for.
+
+The panel shows the health figure next to the cap for a reason. It is capacity
+now against capacity when the pack was new, and it is the number that says
+whether capping is worth doing on this machine or whether the argument is
+already over.
+
+## What it does
+
+| Control | Effect |
+|---|---|
+| Preset row | Sets a standing cap. Default 60, 70, 80 and 90 percent. |
+| Slider | Any cap from 40 to 99, for the values between the presets. |
+| Travel button | Raises the cap to 100% for a fixed period, then reverts on its own. |
+
+A standing cap is a decision you make once. A travel cap is an exception you
+make on a particular day, and the two are kept apart on purpose: the presets
+and the slider cannot reach 100%, and the travel button is the only control
+that can. That is the whole design. A cap set to 100% and forgotten is the
+state this plugin exists to get you out of, so the only route to 100% is the
+one that expires.
+
+The override lasts 24 hours by default, and 8 hours, 3 days, 1 week, or "until
+I change it" are available in the widget's settings. Clicking the button again
+ends it early. It reverts even if you never open the panel again, because the
+expiry is checked by a system timer rather than by the panel.
+
+## Design
+
+A script prints one JSON snapshot and the QML panel renders it. This is the
+same shape as `omarchy-system` and `omarchy-vpn-check`, and it means every
+judgement lives in one testable file that runs fine from a terminal:
+
+```bash
+./bin/battery-limit --text          # cap, charge, health, and setup state
+./bin/battery-limit --pretty        # the JSON the panel consumes
+./bin/battery-limit set 60          # a standing cap
+./bin/battery-limit set 100 --for 3d
+```
+
+### The firmware is the authority, not the request
+
+Every write is read back, and it is the read-back that gets displayed. ASUS
+firmware is free to round a request to its own steps, and on some models it
+does. A panel that echoes your own request at you is reporting an intention
+and calling it a state.
+
+The same distinction runs through the whole tool. The bar reads the hardware
+value; the config file holds what you asked for; and when they disagree the
+panel says so rather than picking one. They disagree in exactly one situation
+worth catching, which is a cap that was configured but did not survive
+something, and hiding that is how you find out six months later that the cap
+has not been on.
+
+### Nothing runs as root, once
+
+Writing the threshold needs root, and there is nowhere to type a password in a
+bar panel. The installer resolves this once by handing the sysfs attribute to
+the `wheel` group through a udev rule, after which the panel and the CLI are
+ordinary unprivileged programs. No polkit agent, no password prompt, no sudo in
+the hot path.
+
+The units that reapply the cap at boot and on resume do run as root, and they
+read the same config file the panel writes. That file is group-writable, so the
+root helper parses it for integers rather than sourcing it. Sourcing a
+group-writable file as root would quietly convert "can set a charge limit" into
+"can run anything as root", which is not a trade worth making for three lines
+of shell.
+
+### Three units, not one
+
+The obvious implementation is a single oneshot service wanted by both
+`multi-user.target` and the sleep targets. It does not work. A oneshot with
+`RemainAfterExit=yes` is still active when the machine resumes, so systemd sees
+nothing to start and the cap is never reapplied; without `RemainAfterExit` the
+unit shows as dead at boot instead. Boot, resume and expiry are three different
+events and they get three units.
+
+Whether the cap survives a suspend at all is model dependent. On this Zenbook
+it does, and the resume unit is insurance that costs one file write.
+
+## Requirements
+
+| Needed | Used for |
+|---|---|
+| An ASUS laptop with `asus_nb_wmi` loaded | the `charge_control_end_threshold` attribute |
+| Omarchy shell with plugin support | the bar widget and panel |
+| Python 3 | the CLI |
+| systemd | reapplying the cap at boot, on resume, and expiring the override |
+
+Nothing here is specific to ASUS beyond the driver that exposes the attribute.
+Any laptop whose kernel driver provides `charge_control_end_threshold` under
+`/sys/class/power_supply` will work, which includes most ThinkPads and several
+other vendors. The battery is found by looking for that attribute rather than
+by assuming `BAT0`.
+
+## License
+
+MIT. See [LICENSE](LICENSE), which also carries the notice for the Omarchy
+plugins this widget's scaffolding is derived from.

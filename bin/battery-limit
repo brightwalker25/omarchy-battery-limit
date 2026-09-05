@@ -1,0 +1,501 @@
+#!/usr/bin/env python3
+"""Read and set the ASUS charge threshold, for the brightwalker25.battery-limit
+bar panel and for use from a terminal.
+
+Design notes:
+
+- The script decides, the panel renders. Which limit is in force, whether a
+  travel override is still running, whether the firmware honoured what it was
+  asked for, and whether the machine is set up to hold the limit across a
+  reboot are all worked out here and shipped as JSON, so the QML holds no
+  policy and every answer can be reproduced at the command line.
+- Nothing here runs as root. The one privileged act, writing to
+  `charge_control_end_threshold`, is made unprivileged once by the installer,
+  which hands the attribute to the `wheel` group through a udev rule. Until
+  that has been done `set` fails with the command to run rather than raising a
+  password prompt inside a bar panel, where there is nowhere to type one.
+- The requested limit and the effective limit are reported separately. ASUS
+  firmware is free to quantise what it is given, and a panel that echoes the
+  request back is claiming something it has not checked. Every write is read
+  back, and it is the read-back that is displayed.
+- The standing limit and the travel override live in a config file rather than
+  in this process, because the units that reapply the limit at boot and on
+  resume run as root, long after any panel has gone. That file is the contract
+  between the two halves, which is why it holds nothing but digits.
+
+Exit status is 0 when the requested operation succeeded, 1 when it did not.
+`status` succeeds even on a machine with no controllable battery; the answer
+is in the JSON.
+"""
+import argparse
+import json
+import os
+import re
+import sys
+import time
+
+CONF = "/etc/omarchy-battery-limit.conf"
+APPLY_HELPER = "/usr/local/lib/omarchy-battery-limit/apply"
+POWER_SUPPLY = "/sys/class/power_supply"
+LIMIT_ATTR = "charge_control_end_threshold"
+START_ATTR = "charge_control_start_threshold"
+
+# Below this a cap stops being battery care and starts being a laptop that
+# dies when unplugged. The firmware would accept less; the tool will not.
+MIN_LIMIT = 40
+MAX_LIMIT = 100
+
+DURATION = re.compile(r"^(\d+)\s*([hdwm])?$", re.I)
+
+
+# --------------------------------------------------------------- sysfs reading
+
+def read_attr(path):
+    try:
+        with open(path) as fh:
+            return fh.read().strip()
+    except OSError:
+        return None
+
+
+def read_int(path):
+    raw = read_attr(path)
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def find_battery():
+    """The first battery exposing a writable-in-principle end threshold.
+
+    Nothing here assumes BAT0. A machine can carry two packs, and only one of
+    them need be the one the firmware throttles.
+    """
+    if not os.path.isdir(POWER_SUPPLY):
+        return None
+    for name in sorted(os.listdir(POWER_SUPPLY)):
+        path = os.path.join(POWER_SUPPLY, name)
+        if not os.path.exists(os.path.join(path, LIMIT_ATTR)):
+            continue
+        if (read_attr(os.path.join(path, "type")) or "") != "Battery":
+            continue
+        return path
+    return None
+
+
+def health(path):
+    """Capacity now against capacity when new, as a percentage.
+
+    Batteries report either energy (uWh) or charge (uAh) depending on the
+    driver. Both are read because a machine that reports one will not report
+    the other, and a health figure is worth more than consistency of units.
+    """
+    for now, design in (("energy_full", "energy_full_design"),
+                        ("charge_full", "charge_full_design")):
+        full = read_int(os.path.join(path, now))
+        new = read_int(os.path.join(path, design))
+        if full and new:
+            return round(full * 100.0 / new, 1)
+    return None
+
+
+# --------------------------------------------------------------- config file
+
+def read_conf():
+    """Parse the config file, accepting digits and nothing else.
+
+    The file is group-writable so that the panel can change the limit without
+    a password, and it is read back by a root helper at boot. Anything that is
+    not a plain integer is discarded rather than interpreted, so that the two
+    halves cannot be talked into meaning something else.
+    """
+    conf = {"limit": None, "travel_limit": None, "travel_until": None}
+    try:
+        with open(CONF) as fh:
+            text = fh.read()
+    except OSError:
+        return conf
+    for key, field in (("LIMIT", "limit"),
+                       ("TRAVEL_LIMIT", "travel_limit"),
+                       ("TRAVEL_UNTIL", "travel_until")):
+        m = re.search(r"^%s=(\d*)$" % key, text, re.M)
+        if m and m.group(1):
+            conf[field] = int(m.group(1))
+    return conf
+
+
+def write_conf(conf):
+    body = (
+        "# Written by battery-limit. Values are integers; anything else is\n"
+        "# ignored by the root helper that reads this file at boot and on\n"
+        "# resume. Edit by hand if you like, or use `battery-limit set`.\n"
+        "#\n"
+        "# LIMIT         the standing charge cap, in percent\n"
+        "# TRAVEL_LIMIT  a temporary cap that overrides it, empty when unused\n"
+        "# TRAVEL_UNTIL  epoch seconds the override expires, empty for never\n"
+        "LIMIT=%s\n"
+        "TRAVEL_LIMIT=%s\n"
+        "TRAVEL_UNTIL=%s\n"
+    ) % (
+        "" if conf["limit"] is None else conf["limit"],
+        "" if conf["travel_limit"] is None else conf["travel_limit"],
+        "" if conf["travel_until"] is None else conf["travel_until"],
+    )
+    tmp = CONF + ".tmp"
+    try:
+        with open(tmp, "w") as fh:
+            fh.write(body)
+        os.replace(tmp, CONF)
+    except OSError as exc:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise exc
+    return True
+
+
+def effective_limit(conf, now=None):
+    """Which of the two configured limits is in force, and why.
+
+    A travel override with no expiry runs until it is cleared by hand. One
+    whose expiry has passed is not in force, and this is the only place that
+    decides so; the caller does not compare clocks.
+    """
+    now = time.time() if now is None else now
+    if conf["travel_limit"] is not None:
+        if conf["travel_until"] is None or now < conf["travel_until"]:
+            return conf["travel_limit"], "travel"
+    return conf["limit"], "standing"
+
+
+# --------------------------------------------------------------- installation
+
+def setup_state(battery):
+    """What of the system integration is present, as three independent facts.
+
+    They are reported separately because they fail separately. The attribute
+    can be writable while the units are missing, which is a machine that takes
+    a new limit now and forgets it at the next reboot, and that is worth
+    saying out loud rather than folding into one boolean.
+    """
+    attr = os.path.join(battery, LIMIT_ATTR) if battery else None
+    return {
+        "writable": bool(attr and os.access(attr, os.W_OK)),
+        "configWritable": os.access(CONF, os.W_OK) if os.path.exists(CONF)
+                          else os.access(os.path.dirname(CONF), os.W_OK),
+        "persists": os.path.exists(APPLY_HELPER),
+    }
+
+
+# --------------------------------------------------------------- the snapshot
+
+def snapshot():
+    battery = find_battery()
+    conf = read_conf()
+    limit, source = effective_limit(conf)
+    setup = setup_state(battery)
+
+    rep = {
+        "generatedAt": int(time.time()),
+        "battery": os.path.basename(battery) if battery else "",
+        "supported": battery is not None,
+        "hardwareLimit": None,
+        "startThreshold": None,
+        "charge": None,
+        "status": "",
+        "healthPercent": None,
+        "cycleCount": None,
+        "configuredLimit": conf["limit"],
+        "travelLimit": conf["travel_limit"],
+        "travelUntil": conf["travel_until"],
+        "effectiveLimit": limit,
+        "effectiveSource": source,
+        "minimum": MIN_LIMIT,
+        "maximum": MAX_LIMIT,
+        "setup": setup,
+        "warnings": [],
+    }
+
+    if not battery:
+        rep["warnings"].append(
+            "No battery on this machine exposes a charge threshold. On ASUS "
+            "hardware that usually means the asus_nb_wmi module is not loaded.")
+        return rep
+
+    rep["hardwareLimit"] = read_int(os.path.join(battery, LIMIT_ATTR))
+    rep["startThreshold"] = read_int(os.path.join(battery, START_ATTR))
+    rep["charge"] = read_int(os.path.join(battery, "capacity"))
+    rep["status"] = read_attr(os.path.join(battery, "status")) or ""
+    rep["healthPercent"] = health(battery)
+    rep["cycleCount"] = read_int(os.path.join(battery, "cycle_count"))
+
+    # The firmware is the authority on what the limit actually is. A config
+    # file that disagrees with it is describing an intention, not a state, and
+    # the difference is exactly what goes wrong when a reboot drops the cap.
+    if limit is not None and rep["hardwareLimit"] is not None \
+            and limit != rep["hardwareLimit"]:
+        rep["warnings"].append(
+            "The battery is capped at %d%% but %d%% is configured. Run "
+            "`battery-limit apply` to put the configured limit back."
+            % (rep["hardwareLimit"], limit))
+
+    if not setup["writable"]:
+        rep["warnings"].append(
+            "The charge threshold is not writable by you. Run the installer "
+            "once with sudo to grant it: see INSTALL.md.")
+    elif not setup["persists"]:
+        rep["warnings"].append(
+            "The limit can be changed but will not survive a reboot. Run the "
+            "installer once with sudo to make it stick.")
+
+    return rep
+
+
+# --------------------------------------------------------------- the actions
+
+def apply_limit(value):
+    """Write one threshold and report what the firmware settled on.
+
+    The read-back is the point. ASUS firmware on some models rounds to its own
+    steps, and a caller that trusts its own request will draw a limit the
+    machine is not keeping.
+    """
+    battery = find_battery()
+    if not battery:
+        return None, "No battery on this machine exposes a charge threshold."
+    attr = os.path.join(battery, LIMIT_ATTR)
+    try:
+        with open(attr, "w") as fh:
+            fh.write("%d\n" % value)
+    except PermissionError:
+        return None, (
+            "Not permitted to write %s. Run the installer once with sudo to "
+            "grant your account access: see INSTALL.md." % attr)
+    except OSError as exc:
+        return None, "Could not write %s: %s" % (attr, exc)
+    return read_int(attr), None
+
+
+def parse_duration(text):
+    """Turn `24h`, `3d`, `2w` or `off` into an expiry, or None for indefinite."""
+    text = str(text).strip().lower()
+    if text in ("off", "never", "forever", "indefinite"):
+        return None
+    m = DURATION.match(text)
+    if not m:
+        raise ValueError(
+            "Cannot read '%s' as a duration. Use 24h, 3d, 2w, or off." % text)
+    n = int(m.group(1))
+    unit = (m.group(2) or "h").lower()
+    seconds = {"m": 60, "h": 3600, "d": 86400, "w": 604800}[unit]
+    return int(time.time()) + n * seconds
+
+
+def cmd_set(args):
+    value = args.value
+    if value < MIN_LIMIT or value > MAX_LIMIT:
+        fail("A limit of %d%% is outside the %d to %d range this tool allows."
+             % (value, MIN_LIMIT, MAX_LIMIT))
+
+    conf = read_conf()
+    travel = args.duration is not None
+
+    if travel:
+        try:
+            conf["travel_until"] = parse_duration(args.duration)
+        except ValueError as exc:
+            fail(str(exc))
+        conf["travel_limit"] = value
+        # A standing limit has to exist for the override to expire back to. On
+        # a first run there may not be one, and reverting to nothing would
+        # silently mean 100%.
+        if conf["limit"] is None:
+            conf["limit"] = 80
+    else:
+        # Setting the limit outright is also how you leave travel mode. Two
+        # ways to say "this is my limit now" would be one too many.
+        conf["limit"] = value
+        conf["travel_limit"] = None
+        conf["travel_until"] = None
+
+    effective, err = apply_limit(value)
+    if err:
+        fail(err)
+
+    try:
+        write_conf(conf)
+    except OSError:
+        warn("The limit was set, but %s could not be written, so it will not "
+             "survive a reboot. Run the installer once with sudo." % CONF)
+
+    return effective
+
+
+def cmd_apply(_args):
+    """Put the configured limit back, retiring a travel override that has run out.
+
+    This is what the boot, resume and timer units call. It is idempotent, and
+    silent when there is nothing configured, because a machine with no config
+    should be left exactly as the firmware left it.
+    """
+    conf = read_conf()
+    limit, source = effective_limit(conf)
+
+    if conf["travel_limit"] is not None and source != "travel":
+        conf["travel_limit"] = None
+        conf["travel_until"] = None
+        try:
+            write_conf(conf)
+        except OSError:
+            pass
+        limit, source = effective_limit(conf)
+
+    if limit is None:
+        return None
+    effective, err = apply_limit(limit)
+    if err:
+        fail(err)
+    return effective
+
+
+def cmd_clear_travel(_args):
+    conf = read_conf()
+    if conf["travel_limit"] is None:
+        return None
+    conf["travel_limit"] = None
+    conf["travel_until"] = None
+    try:
+        write_conf(conf)
+    except OSError:
+        warn("Could not write %s." % CONF)
+    if conf["limit"] is None:
+        return None
+    effective, err = apply_limit(conf["limit"])
+    if err:
+        fail(err)
+    return effective
+
+
+# --------------------------------------------------------------- presentation
+
+def fmt_expiry(ts):
+    if ts is None:
+        return "until you change it"
+    left = ts - time.time()
+    if left <= 0:
+        return "expired"
+    if left < 3600:
+        return "for another %d minutes" % round(left / 60)
+    if left < 86400 * 2:
+        return "for another %d hours" % round(left / 3600)
+    return "for another %d days" % round(left / 86400)
+
+
+def as_text(rep):
+    out = []
+    if not rep["supported"]:
+        out.append("Charge limit: not supported on this machine")
+    else:
+        limit = rep["effectiveLimit"]
+        hw = rep["hardwareLimit"]
+        line = "Charge limit: %s%%" % (hw if hw is not None else "unknown")
+        if rep["effectiveSource"] == "travel":
+            line += " (travel, %s)" % fmt_expiry(rep["travelUntil"])
+            if rep["configuredLimit"] is not None:
+                line += ", then back to %d%%" % rep["configuredLimit"]
+        elif limit is None:
+            line += " (nothing configured)"
+        out.append(line)
+        out.append("Battery %s: %s%%, %s" % (
+            rep["battery"],
+            rep["charge"] if rep["charge"] is not None else "?",
+            rep["status"].lower() or "unknown"))
+        health_line = "Health: "
+        health_line += ("%s%%" % rep["healthPercent"]) \
+            if rep["healthPercent"] is not None else "unknown"
+        if rep["cycleCount"] is not None:
+            health_line += ", %d cycles" % rep["cycleCount"]
+        out.append(health_line)
+        setup = rep["setup"]
+        out.append("Setup: %s, %s" % (
+            "settable without sudo" if setup["writable"] else "NOT settable",
+            "survives reboot" if setup["persists"] else "does NOT survive reboot"))
+    for w in rep["warnings"]:
+        out.append("! " + w)
+    return "\n".join(out)
+
+
+def warn(msg):
+    sys.stderr.write(msg + "\n")
+
+
+def fail(msg):
+    sys.stderr.write(msg + "\n")
+    sys.exit(1)
+
+
+# --------------------------------------------------------------- entry point
+
+def main():
+    # The output flags are accepted on either side of the subcommand, because
+    # `battery-limit apply --text` is the order anyone would type and being
+    # told off for it is a poor reward. SUPPRESS is what makes that work: the
+    # subparser copies leave the attribute unset unless the flag was actually
+    # given, so one passed before the subcommand is not overwritten by the
+    # subparser's own default.
+    #
+    # The default is read back with getattr rather than declared with
+    # set_defaults, because `parents=` shares one Action object across every
+    # parser that lists it, and set_defaults would write through that shared
+    # object and cancel the SUPPRESS it depends on.
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--text", action="store_true",
+                        default=argparse.SUPPRESS,
+                        help="human-readable output instead of JSON")
+    common.add_argument("--pretty", action="store_true",
+                        default=argparse.SUPPRESS, help="indent the JSON")
+
+    p = argparse.ArgumentParser(
+        prog="battery-limit", parents=[common],
+        description="Read and set the ASUS battery charge limit.")
+    sub = p.add_subparsers(dest="command")
+
+    sub.add_parser("status", parents=[common],
+                   help="report the limit, charge and health (default)")
+
+    s = sub.add_parser("set", parents=[common], help="set the charge limit")
+    s.add_argument("value", type=int, metavar="PERCENT")
+    s.add_argument("--for", dest="duration", metavar="DURATION", default=None,
+                   help="make it a travel override that expires: 24h, 3d, 2w, "
+                        "or off for one that does not expire")
+
+    sub.add_parser("apply", parents=[common],
+                   help="reapply the configured limit, retiring an expired "
+                        "travel override")
+    sub.add_parser("clear-travel", parents=[common],
+                   help="drop a travel override and return to the standing limit")
+
+    args = p.parse_args()
+    command = args.command or "status"
+
+    if command == "set":
+        cmd_set(args)
+    elif command == "apply":
+        cmd_apply(args)
+    elif command == "clear-travel":
+        cmd_clear_travel(args)
+
+    rep = snapshot()
+    if getattr(args, "text", False):
+        print(as_text(rep))
+    else:
+        print(json.dumps(rep, indent=2 if getattr(args, "pretty", False) else None))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,77 @@
+{
+  "schemaVersion": 1,
+  "id": "brightwalker25.battery-limit",
+  "name": "Battery Limit",
+  "version": "0.1.0",
+  "author": "brightwalker25",
+  "license": "MIT",
+  "description": "Cap the charge on an ASUS battery to preserve it, and raise the cap for travel with an override that expires on its own",
+  "kinds": [
+    "bar-widget"
+  ],
+  "activation": "on-demand",
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Battery Limit",
+    "description": "The charge cap in the bar, with presets, a slider, battery health, and a travel override that reverts itself",
+    "category": "System",
+    "aliases": [
+      "battery",
+      "battery-limit",
+      "charge",
+      "charge-limit",
+      "threshold",
+      "asus"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "showLimitInBar": true,
+      "presets": "60, 70, 80, 90",
+      "travelDuration": "24 hours",
+      "refreshIntervalMs": 10000
+    },
+    "schema": [
+      {
+        "key": "showLimitInBar",
+        "type": "boolean",
+        "label": "Show the cap in the bar",
+        "defaultValue": true,
+        "description": "Print the current cap next to the glyph. With this off the widget is a glyph alone, and the cap is only visible in the panel."
+      },
+      {
+        "key": "presets",
+        "type": "string",
+        "label": "Preset caps",
+        "defaultValue": "60, 70, 80, 90",
+        "description": "The standing caps offered as one-click buttons, as percentages separated by commas. Four fit comfortably on a row. 100% is not one of these; it is the travel button underneath, which expires."
+      },
+      {
+        "key": "travelDuration",
+        "type": "enum",
+        "label": "Travel override lasts",
+        "options": [
+          "8 hours",
+          "24 hours",
+          "3 days",
+          "1 week",
+          "Until I change it"
+        ],
+        "defaultValue": "24 hours",
+        "description": "How long a cap raised for travel stays raised before it reverts to your standing cap on its own."
+      },
+      {
+        "key": "refreshIntervalMs",
+        "type": "integer",
+        "label": "Re-read every (ms)",
+        "min": 2000,
+        "max": 120000,
+        "step": 1000,
+        "defaultValue": 10000,
+        "description": "How often the panel re-reads the battery while it is open. These are local file reads, and nothing runs while the panel is closed."
+      }
+    ]
+  }
+}
