@@ -75,6 +75,21 @@ tell which account to grant access to, or if that account is not in the `wheel`
 group. It is safe to run again; it overwrites what it wrote before and leaves
 an existing config file alone.
 
+Every file in the table other than the config file starts with the line
+`# Managed by omarchy-battery-limit`, and the installer only ever writes over
+or removes a file that carries it. Before writing anything it checks every
+path, and if any of them already exists without the marker, or is a symlink,
+it names the path and stops without having changed the machine. Such a file
+belongs to the administrator or to another package, and is left for you to
+deal with. There is no option to override this.
+
+Files written by version 0.2.0, which predates the marker, are recognised by
+their exact content, so running the new installer over a 0.2.0 install
+upgrades it in place. A 0.2.0 file that has since been edited by hand no
+longer matches and is refused like any other; if it is yours to discard,
+delete it and run the installer again. Files from 0.1.0 are not recognised,
+and are refused the same way.
+
 It grants access to the `wheel` group rather than to your user, because udev
 sets a group on the attribute and cannot set an ACL entry for one account. On
 this machine `wheel` is already the group that has sudo, so this grants nothing
@@ -234,7 +249,11 @@ omarchy plugin disable brightwalker25.battery-limit
 omarchy plugin remove brightwalker25.battery-limit
 ```
 
-The first line removes the udev rule, the helper and the units. `disable` takes
+The first line removes the udev rule, the helper and the units, and disables
+the units. It only touches files that carry the installer's marker, or that
+match a 0.2.0 install exactly; anything else at those paths is left in place
+and listed as a warning, and a unit of the same name that is not ours is not
+disabled. The helper's directory is removed only once it is empty. `disable` takes
 the widget out of the bar layout and leaves the files in place; `remove`
 deletes the plugin directory too. For a development install, remove the symlink
 rather than the checkout:

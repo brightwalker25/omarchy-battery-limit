@@ -4,6 +4,22 @@ Notable changes to the Battery Limit plugin. Versions follow
 [semantic versioning](https://semver.org), and the format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.1] - 2026-09-26
+
+### Fixed
+
+- The installer no longer overwrites a udev rule, systemd unit or helper that
+  it did not write. Every file it writes now carries the line
+  `# Managed by omarchy-battery-limit`, every target path is checked before
+  anything is written, and a path that exists without the marker stops the
+  install with the path named and nothing changed. Files from a 0.2.0 install
+  are recognised by their exact content and upgraded in place.
+- `--uninstall` removes and disables only files that carry the marker or
+  match a 0.2.0 install, warns about any it leaves, and removes the helper's
+  directory only when it is empty.
+- Files are written to a temporary name and moved into place, so an
+  interrupted install cannot leave a partial rule or unit behind.
+
 ## [0.2.0] - 2026-09-05
 
 ### Added

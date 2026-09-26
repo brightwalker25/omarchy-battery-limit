@@ -10,6 +10,12 @@
 #
 # Run once:   sudo ./bin/battery-limit-install
 # Undo:       sudo ./bin/battery-limit-install --uninstall
+#
+# Every file written here carries the MARKER line below, and nothing is
+# written over or removed from a path that does not. A rule, unit or helper
+# that happens to share one of these names but belongs to the administrator
+# or to another package is left alone, and the installer stops before
+# changing anything.
 
 set -euo pipefail
 
@@ -18,29 +24,103 @@ RULE=/etc/udev/rules.d/99-omarchy-battery-limit.rules
 LIBDIR=/usr/local/lib/omarchy-battery-limit
 HELPER="$LIBDIR/apply"
 UNITDIR=/etc/systemd/system
+UNITS=(omarchy-battery-limit.service
+       omarchy-battery-limit-resume.service
+       omarchy-battery-limit.timer)
 GROUP=wheel
+
+MARKER="# Managed by omarchy-battery-limit"
+
+# Version 0.2.0 wrote the same paths without the marker. Its files are
+# recognised by their exact content, so running this over that install
+# upgrades it in place rather than refusing. A file from that version that has
+# since been edited by hand no longer matches, and is treated as the
+# administrator's.
+LEGACY_SHA256=(
+  92ea8c385a064c6b53e2bc319eeb40f6203a208276de86d09927d7071ab60141 # rule
+  76aaad0c6e3fa5f0674db11a8531f8d4e3f58eaea8f1deaa8bfb62eeb68cde06 # apply
+  304c6f37c5454e21d23aec15c90d21cc308e1a0db387096a9e04f9704a5e570e # .service
+  e9f65518560d768286896269f73e46f6a50544957b26f96843e3ca81d2456657 # -resume.service
+  8f8ad5c2890bfea43a18d3737b44cb58759968a30fddc664b62749e08e9b6ff5 # .timer
+)
 
 # The account that will be setting the limit. The script runs under sudo, so
 # $USER is root and the name has to come from the invoking environment.
 TARGET_USER="${SUDO_USER:-${PKEXEC_UID:+$(id -nu "$PKEXEC_UID")}}"
 
 die() { printf '%s\n' "$*" >&2; exit 1; }
+warn() { printf '%s\n' "$*" >&2; }
+
+# True when the path is a regular file this plugin wrote: it carries the
+# marker, or it is byte for byte a file from 0.2.0. A symlink is never ours,
+# since writing through one would land somewhere else entirely.
+ours() {
+  local path=$1 sum h
+  [[ -f "$path" && ! -L "$path" ]] || return 1
+  grep -qxF "$MARKER" "$path" 2>/dev/null && return 0
+  sum=$(sha256sum "$path" 2>/dev/null) || return 1
+  sum=${sum%% *}
+  for h in "${LEGACY_SHA256[@]}"; do
+    [[ "$sum" == "$h" ]] && return 0
+  done
+  return 1
+}
+
+# True when the path may be written: nothing is there yet, or what is there is
+# ours. A dangling symlink counts as something being there.
+writable_by_us() {
+  [[ -e "$1" || -L "$1" ]] || return 0
+  ours "$1"
+}
+
+# Write stdin to a path by way of a temporary file beside it, so that an
+# interrupted run never leaves a half-written rule or unit behind. The
+# temporary name has no .rules or unit suffix, so neither udev nor systemd
+# will pick it up in the meantime.
+write_file() {
+  local path=$1 mode=$2 tmp
+  tmp=$(mktemp "$path.XXXXXX")
+  if ! cat > "$tmp" || ! chmod "$mode" "$tmp" || ! mv -f "$tmp" "$path"; then
+    rm -f "$tmp"
+    die "Could not write $path."
+  fi
+}
 
 [[ $EUID -eq 0 ]] || die "This has to run as root: sudo $0 $*"
 
 uninstall() {
-  systemctl disable --now omarchy-battery-limit.timer >/dev/null 2>&1 || true
-  systemctl disable omarchy-battery-limit.service >/dev/null 2>&1 || true
-  systemctl disable omarchy-battery-limit-resume.service >/dev/null 2>&1 || true
-  rm -f "$UNITDIR/omarchy-battery-limit.service" \
-        "$UNITDIR/omarchy-battery-limit-resume.service" \
-        "$UNITDIR/omarchy-battery-limit.timer" \
-        "$RULE"
-  rm -rf "$LIBDIR"
+  local unit path skipped=()
+
+  # Disable a unit only when its file is ours. If another unit of the same
+  # name is installed, it is left running exactly as it was.
+  for unit in "${UNITS[@]}"; do
+    path="$UNITDIR/$unit"
+    ours "$path" || continue
+    if [[ "$unit" == *.timer ]]; then
+      systemctl disable --now "$unit" >/dev/null 2>&1 || true
+    else
+      systemctl disable "$unit" >/dev/null 2>&1 || true
+    fi
+  done
+
+  for path in "$RULE" "$HELPER" "${UNITS[@]/#/$UNITDIR/}"; do
+    if ours "$path"; then
+      rm -f "$path"
+    elif [[ -e "$path" || -L "$path" ]]; then
+      skipped+=("$path")
+    fi
+  done
+  # Only removed once it is empty, so anything else put there survives.
+  [[ -d "$LIBDIR" && ! -L "$LIBDIR" ]] && rmdir "$LIBDIR" 2>/dev/null || true
+
   systemctl daemon-reload
   udevadm control --reload-rules || true
 
   echo "Removed the udev rule and the units."
+  if [[ ${#skipped[@]} -gt 0 ]]; then
+    warn "Left alone, because they were not written by this installer:"
+    for path in "${skipped[@]}"; do warn "  $path"; done
+  fi
   echo "Left in place: $CONF, and the current threshold on the battery itself."
   echo "To lift the cap entirely: echo 100 | sudo tee /sys/class/power_supply/*/charge_control_end_threshold"
   exit 0
@@ -66,6 +146,25 @@ than from a root shell, or set SUDO_USER."
 if ! id -nG "$TARGET_USER" | tr ' ' '\n' | grep -qx "$GROUP"; then
   die "$TARGET_USER is not in the '$GROUP' group, so granting the group access
 would not help. Add them first: usermod -aG $GROUP $TARGET_USER"
+fi
+
+# --------------------------------------------------------------- ownership
+
+# Every path is checked before anything is written, so a refusal leaves the
+# machine exactly as it was rather than half installed.
+conflicts=()
+for path in "$RULE" "$HELPER" "${UNITS[@]/#/$UNITDIR/}"; do
+  writable_by_us "$path" || conflicts+=("$path")
+done
+if [[ -e "$LIBDIR" || -L "$LIBDIR" ]] && [[ ! -d "$LIBDIR" || -L "$LIBDIR" ]]; then
+  conflicts+=("$LIBDIR")
+fi
+if [[ ${#conflicts[@]} -gt 0 ]]; then
+  warn "These paths already exist and were not written by this installer:"
+  for path in "${conflicts[@]}"; do warn "  $path"; done
+  die "Nothing has been changed. If they are left over from an earlier install
+and nothing else uses them, remove them and run this again. Otherwise they
+belong to something else, and this plugin cannot be installed alongside it."
 fi
 
 # --------------------------------------------------------------- config file
@@ -111,7 +210,8 @@ chmod 664 "$CONF"
 # threshold and stop Omarchy's own battery panel from disagreeing with this
 # one, but UPower never reads the hardware threshold, so no event changes what
 # it reports. The README explains that in full.
-cat > "$RULE" <<EOF
+write_file "$RULE" 644 <<EOF
+$MARKER
 # Let the $GROUP group set the battery charge thresholds without a password.
 # Installed by battery-limit-install. Removed by --uninstall.
 ACTION=="add", SUBSYSTEM=="power_supply", ATTR{type}=="Battery", \\
@@ -127,8 +227,9 @@ EOF
 # into the ability to run any command as root. Reading only integers out of it
 # prevents that.
 install -d -m 755 "$LIBDIR"
-cat > "$HELPER" <<'EOF'
+write_file "$HELPER" 755 <<'EOF'
 #!/bin/sh
+# Managed by omarchy-battery-limit
 # Put the configured charge limit back on the battery. Called at boot, after
 # resume, and every ten minutes so that a travel override expires on its own.
 #
@@ -182,7 +283,6 @@ for attr in /sys/class/power_supply/*/charge_control_end_threshold; do
 done
 exit 0
 EOF
-chmod 755 "$HELPER"
 
 # --------------------------------------------------------------- units
 
@@ -191,7 +291,8 @@ chmod 755 "$HELPER"
 # RemainAfterExit=yes is still active when the machine resumes, so systemd
 # will not start it again, which means the reapply after resume has to be a
 # unit of its own.
-cat > "$UNITDIR/omarchy-battery-limit.service" <<EOF
+write_file "$UNITDIR/omarchy-battery-limit.service" 644 <<EOF
+$MARKER
 [Unit]
 Description=Apply the configured battery charge limit
 After=multi-user.target
@@ -205,7 +306,8 @@ ExecStart=$HELPER
 WantedBy=multi-user.target
 EOF
 
-cat > "$UNITDIR/omarchy-battery-limit-resume.service" <<EOF
+write_file "$UNITDIR/omarchy-battery-limit-resume.service" 644 <<EOF
+$MARKER
 [Unit]
 Description=Reapply the battery charge limit after resume
 After=suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
@@ -219,7 +321,8 @@ ExecStart=$HELPER
 WantedBy=suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
 EOF
 
-cat > "$UNITDIR/omarchy-battery-limit.timer" <<EOF
+write_file "$UNITDIR/omarchy-battery-limit.timer" 644 <<EOF
+$MARKER
 [Unit]
 Description=Expire a battery charge limit travel override on time
 
